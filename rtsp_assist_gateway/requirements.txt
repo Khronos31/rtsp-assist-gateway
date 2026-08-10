@@ -1,2 +1,4 @@
 paho-mqtt==2.1.0
+pysilero-vad==3.4.0
+websockets==17.0.1
 wyoming==1.10.0

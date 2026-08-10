@@ -13,6 +13,8 @@ SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 ALLOWED_LOG_LEVELS = {"debug", "info", "warning", "error"}
 CANARY_TOPIC = "rtsp_assist_gateway/canary/detection"
+HA_STT_CANARY_TOPIC = "rtsp_assist_gateway/canary/ha_stt"
+MIN_NORMALIZED_ALIAS_LENGTH = 3
 
 
 class ConfigError(ValueError):
@@ -37,10 +39,29 @@ class PassiveCanaryConfig:
 
 
 @dataclass(frozen=True)
+class WakeWordConfig:
+    id: str
+    aliases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HaSttCanaryConfig:
+    enabled: bool
+    source_id: str
+    pipeline_id: str
+    wake_words: tuple[WakeWordConfig, ...]
+    cooldown_seconds: int
+    max_requests_per_minute: int
+    max_audio_seconds_per_hour: int
+    max_audio_seconds_per_day: int
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     log_level: str
     sources: tuple[SourceConfig, ...]
     passive_canary: PassiveCanaryConfig
+    ha_stt_canary: HaSttCanaryConfig
 
 
 def _require_mapping(value: Any, field: str) -> dict[str, Any]:
@@ -103,6 +124,12 @@ def _parse_wyoming_uri(value: Any) -> tuple[str, int]:
     return parsed.hostname, port
 
 
+def _bounded_int(value: Any, field: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ConfigError(f"{field} must be an integer from {minimum} to {maximum}")
+    return value
+
+
 def parse_options(options: Any) -> GatewayConfig:
     root = _require_mapping(options, "options")
     log_level = str(root.get("log_level", "info")).lower()
@@ -155,9 +182,107 @@ def parse_options(options: Any) -> GatewayConfig:
             raise ConfigError(f"duplicate passive_canary model: {model}")
         models.append(model)
 
-    cooldown = raw_canary.get("cooldown_seconds", 3)
-    if isinstance(cooldown, bool) or not isinstance(cooldown, int) or not 0 <= cooldown <= 300:
-        raise ConfigError("passive_canary.cooldown_seconds must be an integer from 0 to 300")
+    cooldown = _bounded_int(
+        raw_canary.get("cooldown_seconds", 3),
+        "passive_canary.cooldown_seconds",
+        0,
+        300,
+    )
+
+    raw_stt = _require_mapping(root.get("ha_stt_canary", {}), "ha_stt_canary")
+    if "mqtt_topic" in raw_stt:
+        raise ConfigError("ha_stt_canary.mqtt_topic is fixed and must not be configured")
+    stt_enabled = raw_stt.get("enabled", False)
+    if not isinstance(stt_enabled, bool):
+        raise ConfigError("ha_stt_canary.enabled must be a boolean")
+
+    stt_source_value = raw_stt.get("source_id", "")
+    if not isinstance(stt_source_value, str):
+        raise ConfigError("ha_stt_canary.source_id must be a string")
+    stt_source_id = stt_source_value.strip()
+
+    pipeline_value = raw_stt.get("pipeline_id", "")
+    if not isinstance(pipeline_value, str):
+        raise ConfigError("ha_stt_canary.pipeline_id must be a string")
+    pipeline_id = pipeline_value.strip()
+    if len(pipeline_id) > 128 or any(ord(character) < 32 for character in pipeline_id):
+        raise ConfigError("ha_stt_canary.pipeline_id contains invalid characters")
+
+    raw_wake_words = raw_stt.get(
+        "wake_words",
+        [{"id": "hey_jarvis", "aliases": ["hey jarvis"]}],
+    )
+    if not isinstance(raw_wake_words, list) or not raw_wake_words:
+        raise ConfigError("ha_stt_canary.wake_words must be a non-empty list")
+
+    # Import here to keep matching normalization in one authoritative place without
+    # introducing a config/matcher import cycle.
+    from .matcher import normalize_for_match
+
+    wake_words: list[WakeWordConfig] = []
+    seen_word_ids: set[str] = set()
+    seen_aliases: dict[str, str] = {}
+    for word_index, raw_word in enumerate(raw_wake_words):
+        word = _require_mapping(raw_word, f"ha_stt_canary.wake_words[{word_index}]")
+        word_id = _require_string(word.get("id"), f"ha_stt_canary.wake_words[{word_index}].id")
+        if not MODEL_RE.fullmatch(word_id):
+            raise ConfigError(f"ha_stt_canary wake-word ID at index {word_index} is invalid")
+        if word_id in seen_word_ids:
+            raise ConfigError(f"duplicate ha_stt_canary wake-word ID: {word_id}")
+        seen_word_ids.add(word_id)
+
+        raw_aliases = word.get("aliases")
+        if not isinstance(raw_aliases, list) or not raw_aliases:
+            raise ConfigError(f"ha_stt_canary aliases for {word_id} must be a non-empty list")
+        aliases: list[str] = []
+        for alias_index, raw_alias in enumerate(raw_aliases):
+            alias = _require_label(
+                raw_alias,
+                f"ha_stt_canary.wake_words[{word_index}].aliases[{alias_index}]",
+            )
+            normalized = normalize_for_match(alias)
+            if len(normalized) < MIN_NORMALIZED_ALIAS_LENGTH:
+                raise ConfigError(
+                    f"ha_stt_canary alias for {word_id} is shorter than "
+                    f"{MIN_NORMALIZED_ALIAS_LENGTH} normalized characters"
+                )
+            previous = seen_aliases.get(normalized)
+            if previous is not None:
+                raise ConfigError(
+                    f"ha_stt_canary alias collision after normalization: {previous} and {word_id}"
+                )
+            seen_aliases[normalized] = word_id
+            aliases.append(alias)
+        wake_words.append(WakeWordConfig(id=word_id, aliases=tuple(aliases)))
+
+    stt_cooldown = _bounded_int(
+        raw_stt.get("cooldown_seconds", 3),
+        "ha_stt_canary.cooldown_seconds",
+        0,
+        300,
+    )
+    max_requests_per_minute = _bounded_int(
+        raw_stt.get("max_requests_per_minute", 6),
+        "ha_stt_canary.max_requests_per_minute",
+        1,
+        60,
+    )
+    max_audio_seconds_per_hour = _bounded_int(
+        raw_stt.get("max_audio_seconds_per_hour", 300),
+        "ha_stt_canary.max_audio_seconds_per_hour",
+        16,
+        3600,
+    )
+    max_audio_seconds_per_day = _bounded_int(
+        raw_stt.get("max_audio_seconds_per_day", 1800),
+        "ha_stt_canary.max_audio_seconds_per_day",
+        16,
+        86400,
+    )
+    if max_audio_seconds_per_day < max_audio_seconds_per_hour:
+        raise ConfigError(
+            "ha_stt_canary.max_audio_seconds_per_day must be at least the hourly limit"
+        )
 
     if enabled:
         if len(sources) != 1:
@@ -166,6 +291,15 @@ def parse_options(options: Any) -> GatewayConfig:
             raise ConfigError("passive_canary.source_id is required when enabled")
         if source_id not in seen_ids:
             raise ConfigError("passive_canary.source_id must reference a configured source")
+    if stt_enabled:
+        if len(sources) != 1:
+            raise ConfigError("Phase 2 HA STT canary requires exactly one source")
+        if not stt_source_id:
+            raise ConfigError("ha_stt_canary.source_id is required when enabled")
+        if stt_source_id not in seen_ids:
+            raise ConfigError("ha_stt_canary.source_id must reference a configured source")
+    if enabled and stt_enabled:
+        raise ConfigError("passive_canary and ha_stt_canary cannot both be enabled")
 
     return GatewayConfig(
         log_level=log_level,
@@ -177,6 +311,16 @@ def parse_options(options: Any) -> GatewayConfig:
             wyoming_port=wyoming_port,
             models=tuple(models),
             cooldown_seconds=cooldown,
+        ),
+        ha_stt_canary=HaSttCanaryConfig(
+            enabled=stt_enabled,
+            source_id=stt_source_id,
+            pipeline_id=pipeline_id,
+            wake_words=tuple(wake_words),
+            cooldown_seconds=stt_cooldown,
+            max_requests_per_minute=max_requests_per_minute,
+            max_audio_seconds_per_hour=max_audio_seconds_per_hour,
+            max_audio_seconds_per_day=max_audio_seconds_per_day,
         ),
     )
 

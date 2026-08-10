@@ -32,7 +32,6 @@ FORBIDDEN_MANIFEST_KEYS = {
     "apparmor",
     "devices",
     "full_access",
-    "homeassistant_api",
     "host_dbus",
     "host_network",
     "ingress",
@@ -58,6 +57,8 @@ def main() -> None:
         raise SystemExit("Initial canary must be experimental and manual-start")
     if config.get("hassio_api") is not True:
         raise SystemExit("MQTT service discovery requires hassio_api")
+    if config.get("homeassistant_api") is not True:
+        raise SystemExit("HA STT mode requires homeassistant_api")
     forbidden = sorted(FORBIDDEN_MANIFEST_KEYS.intersection(config))
     if forbidden:
         raise SystemExit(f"Forbidden add-on permissions or surfaces: {', '.join(forbidden)}")
@@ -69,6 +70,10 @@ def main() -> None:
         raise SystemExit("Missing passive_canary defaults")
     if "passive_canary" not in config.get("schema", {}):
         raise SystemExit("Missing passive_canary schema")
+    if "ha_stt_canary" not in config.get("options", {}):
+        raise SystemExit("Missing ha_stt_canary defaults")
+    if "ha_stt_canary" not in config.get("schema", {}):
+        raise SystemExit("Missing ha_stt_canary schema")
 
     run_sh = ADDON / "run.sh"
     if not run_sh.stat().st_mode & stat.S_IXUSR:
@@ -79,6 +84,12 @@ def main() -> None:
     dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
     if "ffmpeg" not in dockerfile or "requirements.txt" not in dockerfile:
         raise SystemExit("Dockerfile is missing runtime dependencies")
+    requirements = (ADDON / "requirements.txt").read_text(encoding="utf-8")
+    for dependency in ("paho-mqtt==", "pysilero-vad==", "websockets==", "wyoming=="):
+        if dependency not in requirements:
+            raise SystemExit(f"Missing pinned runtime dependency: {dependency.removesuffix('==')}")
+    if "SileroVoiceActivityDetector()" not in dockerfile:
+        raise SystemExit("Dockerfile does not validate the VAD runtime during build")
 
     print(json.dumps({"result": "ok", "note": "static self-check only"}))
 

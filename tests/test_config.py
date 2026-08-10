@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from gateway.config import CANARY_TOPIC, ConfigError, parse_options
+from gateway.config import CANARY_TOPIC, HA_STT_CANARY_TOPIC, ConfigError, parse_options
 
 
 def valid_options() -> dict:
@@ -76,3 +76,75 @@ def test_disabled_canary_allows_no_sources() -> None:
         }
     )
     assert config.sources == ()
+
+
+def stt_options() -> dict:
+    options = valid_options()
+    options["passive_canary"]["enabled"] = False
+    options["ha_stt_canary"] = {
+        "enabled": True,
+        "source_id": "study",
+        "pipeline_id": "",
+        "wake_words": [
+            {
+                "id": "computer",
+                "aliases": ["ねえコンピューター", "ねえコンピュータ"],
+            },
+            {"id": "jarvis", "aliases": ["ヘイジャービス", "ヘイジャーヴィス"]},
+        ],
+        "cooldown_seconds": 3,
+        "max_requests_per_minute": 6,
+        "max_audio_seconds_per_hour": 300,
+        "max_audio_seconds_per_day": 1800,
+    }
+    return options
+
+
+def test_valid_ha_stt_options_accept_multiple_aliases() -> None:
+    config = parse_options(stt_options())
+    assert config.ha_stt_canary.enabled is True
+    assert config.ha_stt_canary.pipeline_id == ""
+    assert config.ha_stt_canary.wake_words[0].aliases == (
+        "ねえコンピューター",
+        "ねえコンピュータ",
+    )
+    assert HA_STT_CANARY_TOPIC == "rtsp_assist_gateway/canary/ha_stt"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda o: o["passive_canary"].update(enabled=True), "cannot both be enabled"),
+        (lambda o: o["ha_stt_canary"].update(source_id="missing"), "configured source"),
+        (lambda o: o["ha_stt_canary"].update(wake_words=[]), "non-empty list"),
+        (
+            lambda o: o["ha_stt_canary"]["wake_words"].append(
+                {"id": "computer", "aliases": ["コンピューター"]}
+            ),
+            "duplicate .* ID",
+        ),
+        (
+            lambda o: o["ha_stt_canary"]["wake_words"].append(
+                {"id": "other", "aliases": ["ねえ、コンピューター"]}
+            ),
+            "collision after normalization",
+        ),
+        (
+            lambda o: o["ha_stt_canary"]["wake_words"].append({"id": "short", "aliases": ["ねえ"]}),
+            "shorter than 3",
+        ),
+        (
+            lambda o: o["ha_stt_canary"].update(mqtt_topic="embodied_ha/chat/set"),
+            "fixed and must not be configured",
+        ),
+        (
+            lambda o: o["ha_stt_canary"].update(max_audio_seconds_per_day=100),
+            "at least the hourly limit",
+        ),
+    ],
+)
+def test_invalid_ha_stt_options_fail_closed(mutate, match: str) -> None:
+    options = stt_options()
+    mutate(options)
+    with pytest.raises(ConfigError, match=match):
+        parse_options(options)

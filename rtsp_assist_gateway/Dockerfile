@@ -6,6 +6,7 @@ RUN apt-get update \
 
 COPY requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python3 -c "from pysilero_vad import SileroVoiceActivityDetector; SileroVoiceActivityDetector()"
 
 WORKDIR /app
 COPY gateway /app/gateway

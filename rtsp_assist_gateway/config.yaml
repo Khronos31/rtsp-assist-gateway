@@ -1,7 +1,7 @@
 name: RTSP Assist Gateway
-version: "0.1.0"
+version: "0.2.0"
 slug: rtsp_assist_gateway
-description: "Experimental passive RTSP audio activation canary."
+description: "Experimental RTSP audio activation canaries."
 advanced: true
 stage: experimental
 arch:
@@ -11,6 +11,7 @@ init: true
 startup: application
 boot: manual
 hassio_api: true
+homeassistant_api: true
 services:
   - mqtt:need
 options:
@@ -23,6 +24,18 @@ options:
     models:
       - hey_jarvis
     cooldown_seconds: 3
+  ha_stt_canary:
+    enabled: false
+    source_id: ""
+    pipeline_id: ""
+    wake_words:
+      - id: hey_jarvis
+        aliases:
+          - hey jarvis
+    cooldown_seconds: 3
+    max_requests_per_minute: 6
+    max_audio_seconds_per_hour: 300
+    max_audio_seconds_per_day: 1800
 schema:
   log_level: list(debug|info|warning|error)
   sources:
@@ -36,3 +49,15 @@ schema:
     models:
       - str
     cooldown_seconds: int(0,300)
+  ha_stt_canary:
+    enabled: bool
+    source_id: str
+    pipeline_id: str
+    wake_words:
+      - id: str
+        aliases:
+          - str
+    cooldown_seconds: int(0,300)
+    max_requests_per_minute: int(1,60)
+    max_audio_seconds_per_hour: int(16,3600)
+    max_audio_seconds_per_day: int(16,86400)

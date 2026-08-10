@@ -17,8 +17,8 @@ def write_versions(tmp_path: Path, manifest: str, python: str) -> tuple[Path, Pa
 
 
 def test_repository_versions_and_tag_match() -> None:
-    versions = validate_versions(tag="v0.1.0")
-    assert versions.manifest == "0.1.0"
+    versions = validate_versions(tag="v0.2.0")
+    assert versions.manifest == "0.2.0"
     assert versions.python == versions.manifest
 
 
@@ -36,8 +36,8 @@ def test_invalid_semver_is_rejected(tmp_path: Path, version: str) -> None:
 
 
 def test_wrong_tag_is_rejected() -> None:
-    with pytest.raises(VersionError, match=r"Git tag must be v0\.1\.0"):
-        validate_versions(tag="v0.1.1")
+    with pytest.raises(VersionError, match=r"Git tag must be v0\.2\.0"):
+        validate_versions(tag="v0.1.0")
 
 
 @pytest.mark.parametrize(
