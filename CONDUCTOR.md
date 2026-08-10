@@ -55,4 +55,8 @@ This increment does not connect to production routes. Before public push, remove
 - `ruff check`, `ruff format --check`, `compileall`, `git diff --check`, and the static packaging self-check pass.
 - The implemented Wyoming client connected to a real microWakeWord 2.1.0 add-on and detected stock `hey_jarvis` from a saved 16 kHz mono signed-16-bit fixture. The fixture is not part of this repository.
 - The live Supervisor MQTT service response was checked without printing values; host, username, and password are strings and port is numeric as expected.
-- Not yet verified: Supervisor manifest acceptance/build, runtime Python 3.11 container, real RTSP input, or real MQTT diagnostic delivery. These remain mandatory before public push.
+- Home Assistant Supervisor accepted and built exact commit `dd50525` on amd64. The resulting Python 3.11 container started with manual boot.
+- At 2026-08-11 00:09:01 JST, a real `camera_study` RTSP source produced stock `hey_jarvis` Detection and one MQTT delivery on the fixed topic with QoS 1 and retain false. The payload contained no URL, credentials, audio, transcript, command, or EHA target.
+- After detection, ffmpeg stopped, the three-second cooldown elapsed, and the source reconnected while the add-on remained healthy.
+- GitHub Actions passed on `dd50525` after public push.
+- Not yet verified: aarch64 container build, long-duration stability, or live failure-injection recovery. These remain later canary gates rather than Phase 1 publication gates.

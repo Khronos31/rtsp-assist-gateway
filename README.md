@@ -6,7 +6,7 @@ The first increment is deliberately a passive canary. It sends one configured RT
 
 ## Current status
 
-This repository is under development. The code is not yet released or approved for installation. The first real Supervisor build and RTSP canary are release gates.
+This repository is under development and has no release tag yet. The Phase 1 passive canary was accepted and built by Home Assistant Supervisor on amd64, then detected stock `hey_jarvis` over a real RTSP source and delivered the fixed diagnostic MQTT event. It is not a production voice-command route.
 
 ## Phase 1 configuration
 
