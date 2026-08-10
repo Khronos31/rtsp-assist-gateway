@@ -1,4 +1,4 @@
-"""One-source HA STT activation canary worker."""
+"""One-source HA STT activation worker."""
 
 from __future__ import annotations
 
@@ -12,13 +12,15 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from .budget import SubmissionBudget
-from .config import HA_STT_CANARY_TOPIC, HaSttCanaryConfig, SourceConfig
+from .config import ACTIVATION_TOPIC, HA_STT_CANARY_TOPIC, HaSttCanaryConfig, SourceConfig
 from .ha_stt import HaSttClient
 from .matcher import WakeWordMatch, match_wake_word_prefix
 from .source import PCM_RATE, PCM_WIDTH, FfmpegPcmSource
 from .vad import VAD_CHUNK_BYTES, capture_speech_segment, new_silero_detector
 
 LOGGER = logging.getLogger(__name__)
+COMMAND_MAX_LENGTH = 500
+ALLOWED_OUTPUT_TOPICS = {HA_STT_CANARY_TOPIC, ACTIVATION_TOPIC}
 
 
 class Publisher(Protocol):
@@ -29,8 +31,10 @@ def build_command_payload(
     source: SourceConfig,
     match: WakeWordMatch,
     request_id: str,
+    *,
+    canary: bool,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "version": 1,
         "event": "wake_command_detected",
         "request_id": request_id,
@@ -40,15 +44,17 @@ def build_command_payload(
         "backend": "ha_stt",
         "wake_word_id": match.wake_word_id,
         "command": match.command,
-        "canary": True,
     }
+    if canary:
+        payload["canary"] = True
+    return payload
 
 
 def _default_source_factory(config: SourceConfig) -> FfmpegPcmSource:
     return FfmpegPcmSource(config, chunk_bytes=VAD_CHUNK_BYTES)
 
 
-class HaSttCanaryWorker:
+class HaSttWorker:
     def __init__(
         self,
         source_config: SourceConfig,
@@ -59,6 +65,8 @@ class HaSttCanaryWorker:
         detector_factory: Callable[[], Any] = new_silero_detector,
         stt_factory: Callable[[str], Any] = HaSttClient,
         budget: SubmissionBudget | None = None,
+        output_topic: str = HA_STT_CANARY_TOPIC,
+        canary: bool = True,
         minimum_backoff: float = 1,
         maximum_backoff: float = 30,
     ) -> None:
@@ -69,6 +77,12 @@ class HaSttCanaryWorker:
         self.detector_factory = detector_factory
         self.stt_factory = stt_factory
         self.budget = budget or SubmissionBudget(canary_config)
+        if output_topic not in ALLOWED_OUTPUT_TOPICS:
+            raise ValueError("HA STT output topic is not allowed")
+        if canary != (output_topic == HA_STT_CANARY_TOPIC):
+            raise ValueError("HA STT output topic and canary mode do not match")
+        self.output_topic = output_topic
+        self.canary = canary
         self.minimum_backoff = minimum_backoff
         self.maximum_backoff = maximum_backoff
 
@@ -104,13 +118,26 @@ class HaSttCanaryWorker:
                 )
                 return True, self.canary_config.cooldown_seconds
 
-            payload = build_command_payload(self.source_config, match, request_id)
+            if len(match.command) > COMMAND_MAX_LENGTH:
+                LOGGER.warning(
+                    "HA STT matched command rejected source_id=%s request_id=%s reason=too_long",
+                    self.source_config.id,
+                    request_id,
+                )
+                return True, self.canary_config.cooldown_seconds
+
+            payload = build_command_payload(
+                self.source_config,
+                match,
+                request_id,
+                canary=self.canary,
+            )
             encoded_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
             publish_backoff = self.minimum_backoff
             while not stop_event.is_set():
                 try:
                     await self.publisher.publish(
-                        HA_STT_CANARY_TOPIC,
+                        self.output_topic,
                         encoded_payload,
                         qos=1,
                         retain=False,
@@ -120,7 +147,7 @@ class HaSttCanaryWorker:
                     raise
                 except Exception as exc:
                     LOGGER.warning(
-                        "HA STT diagnostic publish failed source_id=%s request_id=%s "
+                        "HA STT publish failed source_id=%s request_id=%s "
                         "error_type=%s retry_seconds=%.1f",
                         self.source_config.id,
                         request_id,
@@ -156,7 +183,7 @@ class HaSttCanaryWorker:
                 raise
             except Exception as exc:
                 LOGGER.warning(
-                    "HA STT canary session failed source_id=%s error_type=%s retry_seconds=%.3f",
+                    "HA STT session failed source_id=%s error_type=%s retry_seconds=%.3f",
                     self.source_config.id,
                     type(exc).__name__,
                     backoff,
@@ -170,3 +197,7 @@ async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
         return
     with suppress(TimeoutError):
         await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+
+
+# Backward-compatible internal name for existing imports and downstream tests.
+HaSttCanaryWorker = HaSttWorker

@@ -124,3 +124,52 @@ Add a mutually exclusive one-source HA STT activation canary. It detects bounded
 ## Rollback
 
 Stop the Gateway, select the existing microWakeWord canary or reinstall tagged `v0.1.0`, and leave the production EHA listening path unchanged. No Home Assistant or go2rtc rollback is required.
+
+---
+
+# Conductor specification: minimal production activation routing
+
+## Objective
+
+Create the smallest generic path from a matched HA STT wake command to a versioned MQTT activation event, then let a Home Assistant automation route the canonical wake-word ID to an Embodied HA instance. The Gateway remains independent of Embodied HA and household-specific topic names.
+
+## Acceptance criteria
+
+1. In this repository, `python -m pytest -q`, `ruff check .`, `ruff format --check .`, `python -m compileall rtsp_assist_gateway tests scripts`, `python scripts/check_versions.py`, and `python scripts/verify_packaging.py` all exit zero.
+2. Supervisor options expose a disabled-by-default HA STT activation mode. Parsing rejects any configuration with more than one of passive canary, HA STT canary, and HA STT activation enabled, and rejects an enabled activation whose source is missing or unknown before network access.
+3. A fake STT integration proves that a matched activation publishes exactly once to the fixed `rtsp_assist_gateway/activation` topic with QoS 1 and retain false. Its version-1 payload contains request ID, timestamp, source ID, room, backend, canonical wake-word ID, and command; it contains no `canary`, URL, credential, token, PCM, or transcript field.
+4. Unmatched text still produces no MQTT event and never appears in logs. Publish retry for one logical activation retains the same request ID. Oversized commands are rejected before publish without logging their contents.
+5. In `/config/GitHub/embodied-ha`, the focused MQTT-envelope tests and the full test suite exit zero. Legacy plain-text and legacy `{message, source}` chat payloads remain accepted. A valid version-1 Gateway envelope runs chat once in `voice` mode, passes its allowlisted room directly to that chat subprocess, and atomically updates the user's room belief. Malformed, unsupported, oversized, stale, and duplicate request IDs run no chat. Replay protection is bounded, persisted atomically under `EHA_DATA_DIR`, and rejects the same request ID after a simulated daemon restart.
+6. The EHA MQTT chat listener handles messages sequentially. A valid fresh Gateway envelope received while chat is busy waits for the bounded chat lock and runs once after release instead of being silently skipped; expiry/failure is logged without the command text.
+7. `/config/automations.yaml` contains one disabled-by-default or otherwise non-live-until-deploy automation that accepts only the fixed activation topic, allowlists canonical IDs and source IDs, derives room from a household-owned source map instead of trusting the payload room, republishes a bounded version-1 envelope to the mapped per-instance `chat/set` topic with retain false, and preserves request ID. `ha core check` exits zero after the YAML edit.
+8. `git diff --check` exits zero in the Gateway, Embodied HA, and `/config` repositories, and repository scans find no household entity IDs or individual EHA MQTT prefixes in the public Gateway repository.
+9. **Unverified until separately authorized deployment:** before enabling the study activation, continuous STT for that same source is disabled in every EHA instance that could independently observe it. An exact versioned Gateway build plus the HA automation then delivers one real study utterance through a common route into one EHA chat receiver; a repeated identical request ID, including after an EHA restart, causes no second chat. Stopping Gateway, disabling the automation, restoring prior EHA source settings, and restoring Gateway options returns to the pre-change path without restarting Home Assistant or go2rtc.
+
+## Non-goals
+
+- Multi-source arbitration, all-room rollout, or replacement/removal of EHA's current continuous STT.
+- Wake-only followed by a delayed command; this increment requires wake prefix and command in one utterance.
+- Speaker acknowledgements, TTS changes, microWakeWord production routing, custom-model training, Web UI, or Ingress.
+- Gateway knowledge of Akane, Sora, Midori, their MQTT prefixes, character data, or EHA-specific chat semantics.
+
+## Constraints
+
+- Do not touch `secrets.yaml`, `.ssh/`, or `.storage/`.
+- Never persist raw audio or unmatched transcripts, and never log credentials, RTSP URLs, tokens, PCM, or unmatched text.
+- The production topic is fixed, non-retained, and unavailable to either canary mode.
+- MQTT broker membership remains the existing trust boundary: broker clients can already publish directly to EHA `chat/set`. This increment does not claim publisher authentication. The automation must still prevent payload-controlled room selection by deriving room from its own source map.
+- Edit only the new automation block in the already-dirty `/config/automations.yaml`; preserve all unrelated user changes.
+- Run `ha core check` after editing Home Assistant YAML. Do not run `ha core restart`, add-on rebuild/update/restart, version bump, release, or push in this implementation phase.
+- Embodied HA frontend files are out of scope.
+
+## Rollback
+
+Before deployment, revert the two feature branches and remove only the new automation block. After a later deployment, stop the Gateway, disable the activation automation, and restore the prior add-on options. The legacy EHA chat payload contract remains present, so rollback does not require data migration. No Home Assistant or go2rtc restart is required for the stop/disable rollback itself.
+
+## Increments
+
+1. Freeze the production topic/payload, EHA envelope, automation mapping boundary, and rollback through independent red-team review.
+2. Add Gateway activation configuration and generic publish mode with fake-STT contract/privacy tests.
+3. Add bounded EHA versioned-envelope validation, persistent request-ID deduplication, direct per-chat voice-room binding, and sequential busy handling with compatibility tests.
+4. Add the household-only HA automation and pass `ha core check` without restarting Home Assistant.
+5. Run full repository checks, review diffs, and stop before version bump or deployment.

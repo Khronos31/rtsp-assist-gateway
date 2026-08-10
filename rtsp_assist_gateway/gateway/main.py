@@ -6,7 +6,7 @@ import asyncio
 import logging
 import signal
 
-from .config import ConfigError, load_options
+from .config import ACTIVATION_TOPIC, ConfigError, load_options
 from .mqtt import PahoPublisher, fetch_mqtt_credentials
 from .stt_worker import HaSttCanaryWorker
 from .worker import PassiveCanaryWorker
@@ -22,16 +22,23 @@ async def run() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    if not config.passive_canary.enabled and not config.ha_stt_canary.enabled:
-        LOGGER.info("All canary modes are disabled; waiting for add-on configuration")
+    if not any(
+        (
+            config.passive_canary.enabled,
+            config.ha_stt_canary.enabled,
+            config.ha_stt_activation.enabled,
+        )
+    ):
+        LOGGER.info("All activation modes are disabled; waiting for add-on configuration")
         await stop_event.wait()
         return
 
-    active_source_id = (
-        config.passive_canary.source_id
-        if config.passive_canary.enabled
-        else config.ha_stt_canary.source_id
-    )
+    if config.passive_canary.enabled:
+        active_source_id = config.passive_canary.source_id
+    elif config.ha_stt_canary.enabled:
+        active_source_id = config.ha_stt_canary.source_id
+    else:
+        active_source_id = config.ha_stt_activation.source_id
     source = next(item for item in config.sources if item.id == active_source_id)
     credentials = await asyncio.to_thread(fetch_mqtt_credentials)
     publisher = PahoPublisher(credentials)
@@ -44,13 +51,26 @@ async def run() -> None:
                 ",".join(config.passive_canary.models),
             )
             worker = PassiveCanaryWorker(source, config.passive_canary, publisher)
-        else:
+        elif config.ha_stt_canary.enabled:
             LOGGER.info(
                 "Starting HA STT canary source_id=%s wake_words=%d",
                 source.id,
                 len(config.ha_stt_canary.wake_words),
             )
             worker = HaSttCanaryWorker(source, config.ha_stt_canary, publisher)
+        else:
+            LOGGER.info(
+                "Starting HA STT activation source_id=%s wake_words=%d",
+                source.id,
+                len(config.ha_stt_activation.wake_words),
+            )
+            worker = HaSttCanaryWorker(
+                source,
+                config.ha_stt_activation,
+                publisher,
+                output_topic=ACTIVATION_TOPIC,
+                canary=False,
+            )
         await worker.run_forever(stop_event)
     finally:
         await publisher.close()

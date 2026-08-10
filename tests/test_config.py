@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import pytest
-from gateway.config import CANARY_TOPIC, HA_STT_CANARY_TOPIC, ConfigError, parse_options
+from gateway.config import (
+    ACTIVATION_TOPIC,
+    CANARY_TOPIC,
+    HA_STT_CANARY_TOPIC,
+    ConfigError,
+    parse_options,
+)
 
 
 def valid_options() -> dict:
@@ -114,7 +120,7 @@ def test_valid_ha_stt_options_accept_multiple_aliases() -> None:
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
-        (lambda o: o["passive_canary"].update(enabled=True), "cannot both be enabled"),
+        (lambda o: o["passive_canary"].update(enabled=True), "mutually exclusive"),
         (lambda o: o["ha_stt_canary"].update(source_id="missing"), "configured source"),
         (lambda o: o["ha_stt_canary"].update(wake_words=[]), "non-empty list"),
         (
@@ -145,6 +151,40 @@ def test_valid_ha_stt_options_accept_multiple_aliases() -> None:
 )
 def test_invalid_ha_stt_options_fail_closed(mutate, match: str) -> None:
     options = stt_options()
+    mutate(options)
+    with pytest.raises(ConfigError, match=match):
+        parse_options(options)
+
+
+def activation_options() -> dict:
+    options = stt_options()
+    options["ha_stt_canary"]["enabled"] = False
+    options["ha_stt_activation"] = dict(options["ha_stt_canary"])
+    options["ha_stt_activation"]["enabled"] = True
+    return options
+
+
+def test_valid_activation_uses_fixed_topic() -> None:
+    config = parse_options(activation_options())
+    assert config.ha_stt_activation.enabled is True
+    assert config.ha_stt_canary.enabled is False
+    assert ACTIVATION_TOPIC == "rtsp_assist_gateway/activation"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda o: o["ha_stt_canary"].update(enabled=True), "mutually exclusive"),
+        (lambda o: o["passive_canary"].update(enabled=True), "mutually exclusive"),
+        (lambda o: o["ha_stt_activation"].update(source_id="missing"), "configured source"),
+        (
+            lambda o: o["ha_stt_activation"].update(mqtt_topic="eha_sora/chat/set"),
+            "fixed and must not be configured",
+        ),
+    ],
+)
+def test_invalid_activation_options_fail_closed(mutate, match: str) -> None:
+    options = activation_options()
     mutate(options)
     with pytest.raises(ConfigError, match=match):
         parse_options(options)

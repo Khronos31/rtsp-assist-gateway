@@ -2,11 +2,11 @@
 
 Experimental Home Assistant OS add-on for turning RTSP audio sources into generic activation events.
 
-It provides two mutually exclusive one-source canaries. The microWakeWord route streams PCM to a Wyoming provider. The HA STT route segments speech locally, submits bounded candidates to a selected Home Assistant Assist STT pipeline, and performs deterministic wake-word prefix matching. Neither route invokes Home Assistant services, Embodied HA, chat, or production command topics.
+It provides three mutually exclusive one-source modes. The microWakeWord route streams PCM to a Wyoming provider. The HA STT route segments speech locally, submits bounded candidates to a selected Home Assistant Assist STT pipeline, and performs deterministic wake-word prefix matching. The two canary modes publish only diagnostics; the opt-in HA STT activation mode publishes a generic activation event for Home Assistant automations to route. The gateway never invokes Home Assistant services, Embodied HA, or chat directly.
 
 ## Current status
 
-Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. This is still a diagnostic canary, not a production voice-command route.
+Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. The activation option is disabled by default and remains unreleased until its deployment gate is completed.
 
 ## microWakeWord canary
 
@@ -24,6 +24,18 @@ passive_canary:
     - hey_jarvis
   cooldown_seconds: 3
 ha_stt_canary:
+  enabled: false
+  source_id: ""
+  pipeline_id: ""
+  wake_words:
+    - id: hey_jarvis
+      aliases:
+        - hey jarvis
+  cooldown_seconds: 3
+  max_requests_per_minute: 6
+  max_audio_seconds_per_hour: 300
+  max_audio_seconds_per_day: 1800
+ha_stt_activation:
   enabled: false
   source_id: ""
   pipeline_id: ""
@@ -67,6 +79,18 @@ ha_stt_canary:
   max_requests_per_minute: 6
   max_audio_seconds_per_hour: 300
   max_audio_seconds_per_day: 1800
+ha_stt_activation:
+  enabled: false
+  source_id: ""
+  pipeline_id: ""
+  wake_words:
+    - id: hey_jarvis
+      aliases:
+        - hey jarvis
+  cooldown_seconds: 3
+  max_requests_per_minute: 6
+  max_audio_seconds_per_hour: 300
+  max_audio_seconds_per_day: 1800
 ```
 
 `pipeline_id` may be empty to use Home Assistant's preferred Assist pipeline. `wake_words` is an array, and every canonical wake-word has an `id` plus one or more explicit `aliases`; this is how STT spelling variants are absorbed. Matching applies Unicode NFKC, case folding, and whitespace/punctuation removal, then chooses the longest prefix. Kana conversion, MeCab, fuzzy matching, and AI Tasks are not performed.
@@ -75,6 +99,12 @@ Only a transcript beginning with an alias and containing a non-empty remaining c
 
 HA STT mode necessarily sends household speech candidates to the selected Assist STT provider, which may be remote or metered. The request/minute and audio/hour/day limits are enforced before provider contact and survive ordinary add-on restarts. Disable `ha_stt_canary.enabled` or stop the add-on to end submissions.
 
+## HA STT activation
+
+Set `ha_stt_canary.enabled: false` and configure `ha_stt_activation` with the same fields to opt into generic activation output. Matching commands are published to the fixed topic `rtsp_assist_gateway/activation` with QoS 1 and retain disabled. The version 1 payload contains `request_id`, `timestamp`, `source_id`, configured `room`, `backend`, canonical `wake_word_id`, and `command`; it does not contain the diagnostic `canary` field. Commands longer than 500 Unicode characters are rejected without logging their text.
+
+The fixed topic is intentionally not an agent command topic. A Home Assistant automation must validate and route events for the intended consumer. MQTT remains an at-least-once transport, so consumers must persistently deduplicate `request_id` before causing side effects.
+
 RTSP credentials may be included in the URL when required, but the add-on deliberately never prints the URL or forwards ffmpeg stderr. Raw audio is held only in memory while streaming and is never written to disk.
 
 ## Deliberate non-features
@@ -82,7 +112,7 @@ RTSP credentials may be included in the URL when required, but the add-on delibe
 - No Web UI or Ingress
 - No raw-audio recording
 - No Home Assistant service calls
-- No production command or chat output
+- No direct command or chat output
 - No Embodied HA-specific routing
 - No multi-source arbitration yet
 - No automatic kana, morphological, or fuzzy wake-word matching

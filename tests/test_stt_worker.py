@@ -6,7 +6,13 @@ import logging
 from typing import ClassVar
 
 from gateway.budget import BudgetDecision
-from gateway.config import HA_STT_CANARY_TOPIC, HaSttCanaryConfig, SourceConfig, WakeWordConfig
+from gateway.config import (
+    ACTIVATION_TOPIC,
+    HA_STT_CANARY_TOPIC,
+    HaSttCanaryConfig,
+    SourceConfig,
+    WakeWordConfig,
+)
 from gateway.stt_worker import HaSttCanaryWorker
 
 
@@ -79,9 +85,17 @@ def stt_factory(transcript: str, calls: list[tuple[str, bytes]]):
     return FakeStt
 
 
-async def run_worker(monkeypatch, transcript: str, budget: FakeBudget | None = None):
-    source, canary = configs()
-    publisher = RecordingPublisher()
+async def run_worker(
+    monkeypatch,
+    transcript: str,
+    budget: FakeBudget | None = None,
+    *,
+    output_topic: str = HA_STT_CANARY_TOPIC,
+    canary: bool = True,
+    publisher: RecordingPublisher | None = None,
+):
+    source, stt_config = configs()
+    publisher = publisher or RecordingPublisher()
     calls: list[tuple[str, bytes]] = []
     audio = b"\0" * 32_000
 
@@ -91,12 +105,14 @@ async def run_worker(monkeypatch, transcript: str, budget: FakeBudget | None = N
     monkeypatch.setattr("gateway.stt_worker.capture_speech_segment", fake_capture)
     worker = HaSttCanaryWorker(
         source,
-        canary,
+        stt_config,
         publisher,
         source_factory=FakeSource,
         detector_factory=lambda: object(),
         stt_factory=stt_factory(transcript, calls),
         budget=budget or FakeBudget(),
+        output_topic=output_topic,
+        canary=canary,
     )
     result = await worker.run_once(asyncio.Event())
     return result, publisher, calls, audio
@@ -118,6 +134,7 @@ async def test_match_publishes_canonical_id_and_command(monkeypatch) -> None:
     assert payload["backend"] == "ha_stt"
     assert payload["wake_word_id"] == "computer"
     assert payload["command"] == "電気を消して"
+    assert payload["canary"] is True
     assert FakeSource.instances[-1].closed is True
 
 
@@ -147,6 +164,63 @@ async def test_budget_blocks_before_stt(monkeypatch, caplog) -> None:
     assert publisher.calls == []
     assert budget.durations == [1.0]
     assert "audio_day_limit" in caplog.text
+
+
+async def test_activation_payload_uses_fixed_topic_without_canary(monkeypatch) -> None:
+    _result, publisher, _calls, _audio = await run_worker(
+        monkeypatch,
+        "ねえコンピューター、電気を消して。",
+        output_topic=ACTIVATION_TOPIC,
+        canary=False,
+    )
+    topic, encoded, qos, retain = publisher.calls[0]
+    payload = json.loads(encoded)
+    assert topic == ACTIVATION_TOPIC
+    assert qos == 1
+    assert retain is False
+    assert "canary" not in payload
+    assert payload["request_id"]
+    assert payload["timestamp"]
+
+
+async def test_oversized_command_is_rejected_without_text_logging(monkeypatch, caplog) -> None:
+    secret_command = "秘" * 501
+    with caplog.at_level(logging.WARNING):
+        result, publisher, calls, _audio = await run_worker(
+            monkeypatch,
+            f"ねえコンピューター{secret_command}",
+            output_topic=ACTIVATION_TOPIC,
+            canary=False,
+        )
+    assert result == (True, 3)
+    assert len(calls) == 1
+    assert publisher.calls == []
+    assert secret_command not in caplog.text
+    assert "too_long" in caplog.text
+
+
+async def test_publish_retry_reuses_identical_payload(monkeypatch) -> None:
+    class RetryPublisher(RecordingPublisher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts: list[tuple[str, str, int, bool]] = []
+
+        async def publish(self, topic: str, payload: str, qos: int, retain: bool) -> None:
+            self.attempts.append((topic, payload, qos, retain))
+            if len(self.attempts) == 1:
+                raise OSError("temporary")
+            await super().publish(topic, payload, qos, retain)
+
+    publisher = RetryPublisher()
+    await run_worker(
+        monkeypatch,
+        "ねえコンピューター、電気を消して。",
+        output_topic=ACTIVATION_TOPIC,
+        canary=False,
+        publisher=publisher,
+    )
+    assert len(publisher.attempts) == 2
+    assert publisher.attempts[0] == publisher.attempts[1]
 
 
 async def test_session_failure_does_not_log_source_or_exception_secret(caplog) -> None:

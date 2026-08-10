@@ -36,6 +36,18 @@ options:
     max_requests_per_minute: 6
     max_audio_seconds_per_hour: 300
     max_audio_seconds_per_day: 1800
+  ha_stt_activation:
+    enabled: false
+    source_id: ""
+    pipeline_id: ""
+    wake_words:
+      - id: hey_jarvis
+        aliases:
+          - hey jarvis
+    cooldown_seconds: 3
+    max_requests_per_minute: 6
+    max_audio_seconds_per_hour: 300
+    max_audio_seconds_per_day: 1800
 schema:
   log_level: list(debug|info|warning|error)
   sources:
@@ -50,6 +62,18 @@ schema:
       - str
     cooldown_seconds: int(0,300)
   ha_stt_canary:
+    enabled: bool
+    source_id: str
+    pipeline_id: str
+    wake_words:
+      - id: str
+        aliases:
+          - str
+    cooldown_seconds: int(0,300)
+    max_requests_per_minute: int(1,60)
+    max_audio_seconds_per_hour: int(16,3600)
+    max_audio_seconds_per_day: int(16,86400)
+  ha_stt_activation:
     enabled: bool
     source_id: str
     pipeline_id: str
