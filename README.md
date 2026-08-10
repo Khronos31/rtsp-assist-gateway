@@ -40,3 +40,18 @@ RTSP credentials may be included in the URL when required, but the add-on delibe
 - No multi-source arbitration yet
 
 See [CONDUCTOR.md](CONDUCTOR.md) for the executable acceptance criteria and release gate.
+
+## Version and release tags
+
+`rtsp_assist_gateway/config.yaml` is the canonical version source. The Python `__version__` and a release tag must match it exactly; version `0.1.0` therefore uses tag `v0.1.0`.
+
+CI runs `python scripts/check_versions.py` on every branch and tag. A tag build fails unless `GITHUB_REF_NAME` is exactly `v` plus the manifest version.
+
+For a release, first commit and push the version changes, wait for the exact main commit's `test` workflow to succeed, and then run:
+
+```bash
+python scripts/release_tag.py --tag v0.1.0
+python scripts/release_tag.py --tag v0.1.0 --push
+```
+
+The first command is a dry run. `--push` additionally requires active GitHub rules that prevent updates and deletions under `refs/tags/v*`, verifies successful CI for the exact target SHA, creates an annotated tag, and atomically pushes unchanged `main` plus the new tag. It never edits versions or force-updates a tag.

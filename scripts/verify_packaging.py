@@ -12,6 +12,11 @@ from pathlib import Path
 
 import yaml
 
+if __package__:
+    from .check_versions import validate_versions
+else:
+    from check_versions import validate_versions
+
 ROOT = Path(__file__).resolve().parents[1]
 ADDON = ROOT / "rtsp_assist_gateway"
 REQUIRED = {
@@ -38,6 +43,7 @@ FORBIDDEN_MANIFEST_KEYS = {
 
 
 def main() -> None:
+    validate_versions()
     missing = sorted(str(path.relative_to(ROOT)) for path in REQUIRED if not path.is_file())
     if missing:
         raise SystemExit(f"Missing required package files: {', '.join(missing)}")
@@ -46,7 +52,7 @@ def main() -> None:
     repository = yaml.safe_load((ROOT / "repository.yaml").read_text(encoding="utf-8"))
     if not isinstance(config, dict) or not isinstance(repository, dict):
         raise SystemExit("YAML manifests must contain objects")
-    if config.get("slug") != "rtsp_assist_gateway" or config.get("version") != "0.1.0":
+    if config.get("slug") != "rtsp_assist_gateway":
         raise SystemExit("Unexpected add-on identity")
     if config.get("boot") != "manual" or config.get("stage") != "experimental":
         raise SystemExit("Initial canary must be experimental and manual-start")
