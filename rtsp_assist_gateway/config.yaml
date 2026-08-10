@@ -1,0 +1,38 @@
+name: RTSP Assist Gateway
+version: "0.1.0"
+slug: rtsp_assist_gateway
+description: "Experimental passive RTSP audio activation canary."
+advanced: true
+stage: experimental
+arch:
+  - amd64
+  - aarch64
+init: true
+startup: application
+boot: manual
+hassio_api: true
+services:
+  - mqtt:need
+options:
+  log_level: info
+  sources: []
+  passive_canary:
+    enabled: false
+    source_id: ""
+    wyoming_uri: tcp://47701997-microwakeword:10400
+    models:
+      - hey_jarvis
+    cooldown_seconds: 3
+schema:
+  log_level: list(debug|info|warning|error)
+  sources:
+    - id: str
+      url: str
+      room: str
+  passive_canary:
+    enabled: bool
+    source_id: str
+    wyoming_uri: str
+    models:
+      - str
+    cooldown_seconds: int(0,300)
