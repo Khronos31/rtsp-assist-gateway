@@ -6,7 +6,7 @@ It provides two mutually exclusive one-source canaries. The microWakeWord route 
 
 ## Current status
 
-Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. The HA STT route is a Phase 2 candidate and remains unaccepted until an exact Supervisor build, positive utterance, negative room-audio soak, and privacy-budget checks pass. This is not a production voice-command route.
+Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. This is still a diagnostic canary, not a production voice-command route.
 
 ## microWakeWord canary
 

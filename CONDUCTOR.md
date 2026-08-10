@@ -119,7 +119,7 @@ Add a mutually exclusive one-source HA STT activation canary. It detects bounded
 - At 2026-08-11 01:37:49 JST, the live `camera_study` RTSP source recognized the configured Japanese alias `あかねちゃん`, mapped it to canonical ID `akane`, extracted `テストメッセージを送って`, and published one QoS 1, non-retained diagnostic event on the fixed HA STT topic. This proves the installed add-on token could complete the STT-only Core WebSocket exchange.
 - After the match, the source stopped for the configured three-second cooldown and reconnected without an add-on restart. A subsequent five-minute live room-audio soak produced zero diagnostic events and no RTSP, Home Assistant authentication, or reconnect errors.
 - The live add-on used roughly 40–75 MB of memory. A sampled CPU value reached about 38%, so performance optimization remains follow-up work even though the bounded functional and privacy canary gates passed.
-- GitHub CI and the `v0.2.0` version/tag release contract remain the final publication gates.
+- Supervisor and live-room gates passed; the release helper independently requires successful GitHub CI for the exact target SHA and the protected `v0.2.0` version/tag contract before publication.
 
 ## Rollback
 
