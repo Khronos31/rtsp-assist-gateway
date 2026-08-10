@@ -115,6 +115,11 @@ Add a mutually exclusive one-source HA STT activation canary. It detects bounded
 - Independent red-team judgment was REVISE. Aggregate STT budgets, explicit Home Assistant API permission review, and negative-audio false-activation evidence were added as release gates.
 - The candidate implementation passes 58 tests plus Ruff, format, compileall, version, packaging, and diff checks. Tests cover multiple canonical wake words and aliases, normalization collisions, longest-prefix matching, bounded VAD, persisted aggregate budgets, the STT-only WebSocket wire contract, no-match privacy, and fail-closed retries.
 - The actual candidate VAD and WebSocket adapter processed a saved private recording in memory: Silero selected a 1.824-second segment, Home Assistant returned non-empty STT, and a wake-word-only transcript was correctly rejected because no command remained. No recording or transcript was added to the repository.
+- Home Assistant Supervisor accepted and installed exact candidate commit `4c647a3` as a disposable, manually booted `0.2.0` add-on with `homeassistant_api: true`; the stopped official `0.1.0` installation remained unchanged as rollback.
+- At 2026-08-11 01:37:49 JST, the live `camera_study` RTSP source recognized the configured Japanese alias `あかねちゃん`, mapped it to canonical ID `akane`, extracted `テストメッセージを送って`, and published one QoS 1, non-retained diagnostic event on the fixed HA STT topic. This proves the installed add-on token could complete the STT-only Core WebSocket exchange.
+- After the match, the source stopped for the configured three-second cooldown and reconnected without an add-on restart. A subsequent five-minute live room-audio soak produced zero diagnostic events and no RTSP, Home Assistant authentication, or reconnect errors.
+- The live add-on used roughly 40–75 MB of memory. A sampled CPU value reached about 38%, so performance optimization remains follow-up work even though the bounded functional and privacy canary gates passed.
+- GitHub CI and the `v0.2.0` version/tag release contract remain the final publication gates.
 
 ## Rollback
 
