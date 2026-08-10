@@ -1,5 +1,5 @@
 name: RTSP Assist Gateway
-version: "0.2.0"
+version: "0.3.0"
 slug: rtsp_assist_gateway
 description: "Experimental RTSP audio activation canaries."
 advanced: true
