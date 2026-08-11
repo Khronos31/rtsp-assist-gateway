@@ -33,6 +33,7 @@ def build_command_payload(
     request_id: str,
     *,
     canary: bool,
+    backend: str = "ha_stt",
 ) -> dict[str, Any]:
     payload = {
         "version": 1,
@@ -41,7 +42,7 @@ def build_command_payload(
         "timestamp": datetime.now(UTC).isoformat(),
         "source_id": source.id,
         "room": source.room,
-        "backend": "ha_stt",
+        "backend": backend,
         "wake_word_id": match.wake_word_id,
         "command": match.command,
     }

@@ -1,5 +1,5 @@
 name: RTSP Assist Gateway
-version: "0.3.0"
+version: "0.4.0"
 slug: rtsp_assist_gateway
 description: "Experimental RTSP audio activation canaries."
 advanced: true
@@ -48,6 +48,20 @@ options:
     max_requests_per_minute: 6
     max_audio_seconds_per_hour: 300
     max_audio_seconds_per_day: 1800
+  microwakeword_activation:
+    enabled: false
+    source_id: ""
+    wyoming_uri: tcp://47701997-microwakeword:10400
+    wake_words:
+      - model: hey_jarvis
+        id: hey_jarvis
+        aliases:
+          - hey jarvis
+    pipeline_id: ""
+    cooldown_seconds: 3
+    max_requests_per_minute: 6
+    max_audio_seconds_per_hour: 300
+    max_audio_seconds_per_day: 1800
 schema:
   log_level: list(debug|info|warning|error)
   sources:
@@ -81,6 +95,20 @@ schema:
       - id: str
         aliases:
           - str
+    cooldown_seconds: int(0,300)
+    max_requests_per_minute: int(1,60)
+    max_audio_seconds_per_hour: int(16,3600)
+    max_audio_seconds_per_day: int(16,86400)
+  microwakeword_activation:
+    enabled: bool
+    source_id: str
+    wyoming_uri: str
+    wake_words:
+      - model: str
+        id: str
+        aliases:
+          - str
+    pipeline_id: str
     cooldown_seconds: int(0,300)
     max_requests_per_minute: int(1,60)
     max_audio_seconds_per_hour: int(16,3600)

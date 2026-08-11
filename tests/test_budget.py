@@ -4,7 +4,12 @@ import json
 
 import pytest
 from gateway.budget import BudgetError, SubmissionBudget
-from gateway.config import HaSttCanaryConfig, WakeWordConfig
+from gateway.config import (
+    HaSttCanaryConfig,
+    MicroWakeWordActivationConfig,
+    MicroWakeWordMapping,
+    WakeWordConfig,
+)
 
 
 def config(
@@ -37,6 +42,34 @@ def test_request_budget_persists_across_instances(tmp_path) -> None:
     now[0] += 61
     assert SubmissionBudget(config(), path, lambda: now[0]).consume(1).allowed
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_budget_is_shared_when_switching_to_microwakeword_mode(tmp_path) -> None:
+    now = [1_000.0]
+    path = tmp_path / "shared-budget.json"
+    ha_config = config(requests=1)
+    micro_config = MicroWakeWordActivationConfig(
+        enabled=True,
+        source_id="study",
+        wyoming_host="microwakeword",
+        wyoming_port=10400,
+        wake_words=(
+            MicroWakeWordMapping(
+                model="computer_v1",
+                id="computer",
+                aliases=("ねえコンピューター",),
+            ),
+        ),
+        pipeline_id="",
+        cooldown_seconds=0,
+        max_requests_per_minute=1,
+        max_audio_seconds_per_hour=10,
+        max_audio_seconds_per_day=20,
+    )
+    assert SubmissionBudget(ha_config, path, lambda: now[0]).consume(1).allowed
+    switched = SubmissionBudget(micro_config, path, lambda: now[0]).consume(1)
+    assert switched.allowed is False
+    assert switched.reason == "request_minute_limit"
 
 
 def test_hourly_and_daily_audio_budgets(tmp_path) -> None:

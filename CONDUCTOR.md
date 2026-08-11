@@ -173,3 +173,74 @@ Before deployment, revert the two feature branches and remove only the new autom
 3. Add bounded EHA versioned-envelope validation, persistent request-ID deduplication, direct per-chat voice-room binding, and sequential busy handling with compatibility tests.
 4. Add the household-only HA automation and pass `ha core check` without restarting Home Assistant.
 5. Run full repository checks, review diffs, and stop before version bump or deployment.
+
+# Conductor specification: microWakeWord-gated activation
+
+## Objective
+
+Add a production activation mode in which a configured microWakeWord model detects the wake phrase locally, and only the bounded utterance associated with that detection is submitted to the selected Home Assistant STT pipeline for command transcription. Publish the resulting generic command event through the existing fixed MQTT contract without teaching the Gateway about Embodied HA or household residents.
+
+## Acceptance criteria
+
+1. `python -m pytest -q`, `ruff check .`, `ruff format --check .`, `python -m compileall rtsp_assist_gateway tests scripts`, `python scripts/check_versions.py`, and `python scripts/verify_packaging.py` all exit zero in this repository.
+2. Supervisor options expose a disabled-by-default `microwakeword_activation` mode. Parsing validates one source, a credential-free Wyoming URI, unique model-to-canonical-ID mappings, optional aliases, the STT pipeline ID, cooldown, and the existing persistent STT privacy budgets. Exactly one of passive canary, HA STT canary, HA STT activation, and microWakeWord activation may be enabled.
+3. A fake continuous PCM source proves that microWakeWord and local VAD observe the same bounded stream: no HA STT call occurs before a configured model detection; after detection, only the currently active or just-completed temporally associated utterance is eligible, without reopening the RTSP source; exactly one bounded PCM segment is submitted to HA STT. If no associated segment exists within the fixed grace window, nothing is submitted and the worker does not wait for an unrelated later utterance.
+4. The detected model, not STT recognition of the wake phrase, authorizes activation. When STT begins with a configured alias, that alias is stripped; when it does not, the non-empty transcript remains the command. Empty or over-500-character commands publish nothing and their text is never logged.
+5. A successful command publishes exactly once to `rtsp_assist_gateway/activation` with QoS 1 and retain false. Its version-1 payload contains `event=wake_command_detected`, `backend=microwakeword`, the mapped canonical `wake_word_id`, source/room/request/timestamp, and command; it contains no canary flag, model name, URL, credential, token, PCM, or separate transcript field. Publish retry reuses the identical payload and request ID.
+6. Budget exhaustion blocks HA STT before provider contact, provider/source failures use bounded backoff, raw audio is held only in bounded memory, and logs contain neither matched/unmatched transcripts nor source secrets.
+7. In `/config/GitHub/embodied-ha`, focused and full tests accept only the allowlisted `microwakeword` backend in addition to `ha_stt`; unknown backends remain rejected and the existing replay/room binding behavior is unchanged. `/config/automations.yaml` allowlists those same two backends and `ha core check` exits zero.
+8. `git diff --check` exits zero in the Gateway, Embodied HA, and `/config` repositories. A repository scan finds no household entity IDs, personal names, or EHA MQTT prefixes in the public Gateway repository.
+9. **Unverified until separately authorized deployment:** after a fresh six-hour passive-canary interval with zero unintended detections from the configured custom model, an exact versioned add-on build detects one real wake utterance, sends only its associated bounded utterance to HA STT, publishes one correlated activation, and produces one downstream assistant chat/reply. A duplicate request ID causes no second chat. Restoring the saved Gateway options returns to passive-canary mode without restarting Home Assistant or go2rtc.
+
+## Non-goals
+
+- Training or improving microWakeWord models, changing the Wyoming provider, or claiming that the observed 2/3 positive rate is sufficient for general release.
+- Multi-source arbitration, simultaneous activation modes, speaker acknowledgement/chimes, TTS changes, Web UI, or Ingress.
+- Removing the existing HA STT canary/activation modes or making HA STT optional for command transcription.
+- Direct Gateway calls to Embodied HA, resident-specific routing, or configurable MQTT output topics.
+
+## Constraints
+
+- Do not touch `secrets.yaml`, `.ssh/`, or `.storage/`.
+- Never persist raw audio or transcripts. Never log RTSP URLs, credentials, Supervisor tokens, MQTT passwords, PCM, or transcript/command content.
+- Use one bounded ffmpeg PCM stream per active source. microWakeWord is the wake authority; HA STT is contacted only after detection and only for the associated bounded utterance.
+- Keep the fixed generic MQTT boundary and existing household automation routing. The public Gateway must not contain household identities, entity IDs, or EHA topic names.
+- Run `ha core check` after editing Home Assistant YAML. Do not run `ha core restart`, add-on rebuild/update/restart, version bump, release, push, or production option changes in this implementation phase.
+- Embodied HA frontend files are out of scope.
+
+## Rollback
+
+Before deployment, abandon or revert the Gateway and Embodied HA feature branches and revert only the backend allowlist change in the household automation. After a later deployment, stop the Gateway, restore the exact saved Supervisor options with passive canary enabled and microWakeWord activation disabled, then restart only the Gateway. No HA Core or go2rtc restart is required.
+
+## Increments
+
+1. Freeze the configuration, continuous-PCM/VAD handoff, payload, privacy, and rollback contracts through red-team review.
+2. Add a stateful bounded VAD collector and prove that wake detection and command capture share one PCM source.
+3. Add microWakeWord activation configuration and worker with fake Wyoming/STT/MQTT contract tests.
+4. Extend the EHA backend allowlist and household automation, then pass focused tests and `ha core check`.
+5. Run full checks across all affected repositories, review diffs, and stop before version bump or deployment.
+
+## Evidence report (2026-08-11)
+
+- Criteria 1–6: PASS. Gateway has 89 passing tests; Ruff lint/format, compileall, version consistency,
+  packaging verification, and `git diff --check` all pass. Contract tests cover one shared PCM source,
+  temporal association/no-later-wait behavior, model authority, bounded commands, identical publish retry,
+  persistent budget blocking before STT, and transcript/source-secret log redaction.
+- Criterion 7: PASS before deployment. Embodied HA has 1,050 passing tests plus 186 passing subtests; the
+  focused backend tests pass, and `ha core check` accepts the household automation change. No HA reload or
+  restart was performed.
+- Criterion 8: PASS. Diff checks pass in all three affected trees. Newly added public Gateway production
+  code, tests, schema, and documentation use generic model/source identities and contain no household MQTT
+  prefixes or entity IDs.
+- Criterion 9: PENDING. The private custom-model provider/live-path check detected 2 of 3 intentional calls,
+  which proves path liveness but is not a general recall claim. Because those calls intentionally interrupted
+  the passive interval, the fresh zero-unintended-detection soak runs from 2026-08-11 16:20:23 JST through at
+  least 22:20:23 JST. Version bump, commit, build, option switch, and production E2E remain separately gated.
+
+## Increment log
+
+- Increment 1: COMPLETE — specification and rollback frozen; red-team REVISE findings incorporated.
+- Increment 2: COMPLETE — bounded stateful VAD collector and same-stream tests implemented.
+- Increment 3: COMPLETE — disabled-by-default configuration, worker, MQTT contract, privacy, and budget tests implemented.
+- Increment 4: COMPLETE — EHA/automation backend allowlists implemented and verified without reload/restart.
+- Increment 5: COMPLETE for pre-deployment evidence; live criterion 9 remains intentionally pending.

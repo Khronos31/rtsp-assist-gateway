@@ -46,6 +46,13 @@ class WakeWordConfig:
 
 
 @dataclass(frozen=True)
+class MicroWakeWordMapping:
+    model: str
+    id: str
+    aliases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class HaSttCanaryConfig:
     enabled: bool
     source_id: str
@@ -58,12 +65,31 @@ class HaSttCanaryConfig:
 
 
 @dataclass(frozen=True)
+class MicroWakeWordActivationConfig:
+    enabled: bool
+    source_id: str
+    wyoming_host: str
+    wyoming_port: int
+    wake_words: tuple[MicroWakeWordMapping, ...]
+    pipeline_id: str
+    cooldown_seconds: int
+    max_requests_per_minute: int
+    max_audio_seconds_per_hour: int
+    max_audio_seconds_per_day: int
+
+    @property
+    def models(self) -> tuple[str, ...]:
+        return tuple(word.model for word in self.wake_words)
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     log_level: str
     sources: tuple[SourceConfig, ...]
     passive_canary: PassiveCanaryConfig
     ha_stt_canary: HaSttCanaryConfig
     ha_stt_activation: HaSttCanaryConfig
+    microwakeword_activation: MicroWakeWordActivationConfig
 
 
 def _require_mapping(value: Any, field: str) -> dict[str, Any]:
@@ -103,13 +129,13 @@ def _parse_rtsp_url(value: Any, source_id: str) -> str:
     return url
 
 
-def _parse_wyoming_uri(value: Any) -> tuple[str, int]:
-    uri = _require_string(value, "passive_canary.wyoming_uri")
+def _parse_wyoming_uri(value: Any, field: str = "passive_canary") -> tuple[str, int]:
+    uri = _require_string(value, f"{field}.wyoming_uri")
     try:
         parsed = urlsplit(uri)
         port = parsed.port
     except ValueError as exc:
-        raise ConfigError("passive_canary.wyoming_uri is invalid") from exc
+        raise ConfigError(f"{field}.wyoming_uri is invalid") from exc
     if (
         parsed.scheme != "tcp"
         or not parsed.hostname
@@ -120,9 +146,9 @@ def _parse_wyoming_uri(value: Any) -> tuple[str, int]:
         or parsed.query
         or parsed.fragment
     ):
-        raise ConfigError("passive_canary.wyoming_uri must be tcp://host:port")
+        raise ConfigError(f"{field}.wyoming_uri must be tcp://host:port")
     if not 1 <= port <= 65535:
-        raise ConfigError("passive_canary.wyoming_uri port is invalid")
+        raise ConfigError(f"{field}.wyoming_uri port is invalid")
     return parsed.hostname, port
 
 
@@ -238,6 +264,119 @@ def _parse_ha_stt_config(root: dict[str, Any], field: str) -> HaSttCanaryConfig:
     )
 
 
+def _parse_microwakeword_activation(
+    root: dict[str, Any],
+) -> MicroWakeWordActivationConfig:
+    field = "microwakeword_activation"
+    raw = _require_mapping(root.get(field, {}), field)
+    if "mqtt_topic" in raw:
+        raise ConfigError(f"{field}.mqtt_topic is fixed and must not be configured")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"{field}.enabled must be a boolean")
+
+    source_value = raw.get("source_id", "")
+    if not isinstance(source_value, str):
+        raise ConfigError(f"{field}.source_id must be a string")
+    source_id = source_value.strip()
+
+    pipeline_value = raw.get("pipeline_id", "")
+    if not isinstance(pipeline_value, str):
+        raise ConfigError(f"{field}.pipeline_id must be a string")
+    pipeline_id = pipeline_value.strip()
+    if len(pipeline_id) > 128 or any(ord(character) < 32 for character in pipeline_id):
+        raise ConfigError(f"{field}.pipeline_id contains invalid characters")
+
+    wyoming_uri = raw.get("wyoming_uri", "tcp://47701997-microwakeword:10400")
+    wyoming_host, wyoming_port = _parse_wyoming_uri(wyoming_uri, field)
+
+    raw_wake_words = raw.get(
+        "wake_words",
+        [{"model": "hey_jarvis", "id": "hey_jarvis", "aliases": ["hey jarvis"]}],
+    )
+    if not isinstance(raw_wake_words, list) or not raw_wake_words:
+        raise ConfigError(f"{field}.wake_words must be a non-empty list")
+
+    from .matcher import normalize_for_match
+
+    wake_words: list[MicroWakeWordMapping] = []
+    seen_models: set[str] = set()
+    for index, raw_word in enumerate(raw_wake_words):
+        word = _require_mapping(raw_word, f"{field}.wake_words[{index}]")
+        model = _require_string(word.get("model"), f"{field}.wake_words[{index}].model")
+        if not MODEL_RE.fullmatch(model):
+            raise ConfigError(f"{field} model at index {index} is invalid")
+        if model in seen_models:
+            raise ConfigError(f"duplicate {field} model: {model}")
+        seen_models.add(model)
+
+        word_id = _require_string(word.get("id"), f"{field}.wake_words[{index}].id")
+        if not MODEL_RE.fullmatch(word_id):
+            raise ConfigError(f"{field} wake-word ID at index {index} is invalid")
+
+        raw_aliases = word.get("aliases")
+        if not isinstance(raw_aliases, list) or not raw_aliases:
+            raise ConfigError(f"{field} aliases for {model} must be a non-empty list")
+        aliases: list[str] = []
+        seen_aliases: set[str] = set()
+        for alias_index, raw_alias in enumerate(raw_aliases):
+            alias = _require_label(
+                raw_alias,
+                f"{field}.wake_words[{index}].aliases[{alias_index}]",
+            )
+            normalized = normalize_for_match(alias)
+            if len(normalized) < MIN_NORMALIZED_ALIAS_LENGTH:
+                raise ConfigError(
+                    f"{field} alias for {model} is shorter than "
+                    f"{MIN_NORMALIZED_ALIAS_LENGTH} normalized characters"
+                )
+            if normalized in seen_aliases:
+                raise ConfigError(f"duplicate {field} alias for model: {model}")
+            seen_aliases.add(normalized)
+            aliases.append(alias)
+        wake_words.append(MicroWakeWordMapping(model=model, id=word_id, aliases=tuple(aliases)))
+
+    cooldown_seconds = _bounded_int(
+        raw.get("cooldown_seconds", 3),
+        f"{field}.cooldown_seconds",
+        0,
+        300,
+    )
+    max_requests_per_minute = _bounded_int(
+        raw.get("max_requests_per_minute", 6),
+        f"{field}.max_requests_per_minute",
+        1,
+        60,
+    )
+    max_audio_seconds_per_hour = _bounded_int(
+        raw.get("max_audio_seconds_per_hour", 300),
+        f"{field}.max_audio_seconds_per_hour",
+        16,
+        3600,
+    )
+    max_audio_seconds_per_day = _bounded_int(
+        raw.get("max_audio_seconds_per_day", 1800),
+        f"{field}.max_audio_seconds_per_day",
+        16,
+        86400,
+    )
+    if max_audio_seconds_per_day < max_audio_seconds_per_hour:
+        raise ConfigError(f"{field}.max_audio_seconds_per_day must be at least the hourly limit")
+
+    return MicroWakeWordActivationConfig(
+        enabled=enabled,
+        source_id=source_id,
+        wyoming_host=wyoming_host,
+        wyoming_port=wyoming_port,
+        wake_words=tuple(wake_words),
+        pipeline_id=pipeline_id,
+        cooldown_seconds=cooldown_seconds,
+        max_requests_per_minute=max_requests_per_minute,
+        max_audio_seconds_per_hour=max_audio_seconds_per_hour,
+        max_audio_seconds_per_day=max_audio_seconds_per_day,
+    )
+
+
 def parse_options(options: Any) -> GatewayConfig:
     root = _require_mapping(options, "options")
     log_level = str(root.get("log_level", "info")).lower()
@@ -299,6 +438,7 @@ def parse_options(options: Any) -> GatewayConfig:
 
     ha_stt_canary = _parse_ha_stt_config(root, "ha_stt_canary")
     ha_stt_activation = _parse_ha_stt_config(root, "ha_stt_activation")
+    microwakeword_activation = _parse_microwakeword_activation(root)
 
     if enabled:
         if len(sources) != 1:
@@ -321,12 +461,27 @@ def parse_options(options: Any) -> GatewayConfig:
             raise ConfigError("ha_stt_activation.source_id is required when enabled")
         if ha_stt_activation.source_id not in seen_ids:
             raise ConfigError("ha_stt_activation.source_id must reference a configured source")
+    if microwakeword_activation.enabled:
+        if len(sources) != 1:
+            raise ConfigError("microWakeWord activation requires exactly one source")
+        if not microwakeword_activation.source_id:
+            raise ConfigError("microwakeword_activation.source_id is required when enabled")
+        if microwakeword_activation.source_id not in seen_ids:
+            raise ConfigError(
+                "microwakeword_activation.source_id must reference a configured source"
+            )
     active_modes = sum(
-        (enabled, ha_stt_canary.enabled, ha_stt_activation.enabled),
+        (
+            enabled,
+            ha_stt_canary.enabled,
+            ha_stt_activation.enabled,
+            microwakeword_activation.enabled,
+        ),
     )
     if active_modes > 1:
         raise ConfigError(
-            "passive_canary, ha_stt_canary, and ha_stt_activation are mutually exclusive"
+            "passive_canary, ha_stt_canary, ha_stt_activation, and "
+            "microwakeword_activation are mutually exclusive"
         )
 
     return GatewayConfig(
@@ -342,6 +497,7 @@ def parse_options(options: Any) -> GatewayConfig:
         ),
         ha_stt_canary=ha_stt_canary,
         ha_stt_activation=ha_stt_activation,
+        microwakeword_activation=microwakeword_activation,
     )
 
 

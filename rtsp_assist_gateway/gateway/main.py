@@ -7,6 +7,7 @@ import logging
 import signal
 
 from .config import ACTIVATION_TOPIC, ConfigError, load_options
+from .microwake_worker import MicroWakeWordActivationWorker
 from .mqtt import PahoPublisher, fetch_mqtt_credentials
 from .stt_worker import HaSttCanaryWorker
 from .worker import PassiveCanaryWorker
@@ -27,6 +28,7 @@ async def run() -> None:
             config.passive_canary.enabled,
             config.ha_stt_canary.enabled,
             config.ha_stt_activation.enabled,
+            config.microwakeword_activation.enabled,
         )
     ):
         LOGGER.info("All activation modes are disabled; waiting for add-on configuration")
@@ -37,8 +39,10 @@ async def run() -> None:
         active_source_id = config.passive_canary.source_id
     elif config.ha_stt_canary.enabled:
         active_source_id = config.ha_stt_canary.source_id
-    else:
+    elif config.ha_stt_activation.enabled:
         active_source_id = config.ha_stt_activation.source_id
+    else:
+        active_source_id = config.microwakeword_activation.source_id
     source = next(item for item in config.sources if item.id == active_source_id)
     credentials = await asyncio.to_thread(fetch_mqtt_credentials)
     publisher = PahoPublisher(credentials)
@@ -58,7 +62,7 @@ async def run() -> None:
                 len(config.ha_stt_canary.wake_words),
             )
             worker = HaSttCanaryWorker(source, config.ha_stt_canary, publisher)
-        else:
+        elif config.ha_stt_activation.enabled:
             LOGGER.info(
                 "Starting HA STT activation source_id=%s wake_words=%d",
                 source.id,
@@ -70,6 +74,17 @@ async def run() -> None:
                 publisher,
                 output_topic=ACTIVATION_TOPIC,
                 canary=False,
+            )
+        else:
+            LOGGER.info(
+                "Starting microWakeWord activation source_id=%s models=%d",
+                source.id,
+                len(config.microwakeword_activation.wake_words),
+            )
+            worker = MicroWakeWordActivationWorker(
+                source,
+                config.microwakeword_activation,
+                publisher,
             )
         await worker.run_forever(stop_event)
     finally:
