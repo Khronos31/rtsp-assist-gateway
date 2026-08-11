@@ -4,6 +4,18 @@ Notable changes to RTSP Assist Gateway are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- Added disabled-by-default, fixed-topic transcript events with a 16 KiB complete-JSON limit.
+- Reused the production activation source, VAD, STT request, and aggregate privacy budget when configured
+  identically.
+
+### Safety
+
+- Bounded pending PCM to the latest segment and kept transcript delivery failure from suppressing wake
+  activation.
+- Documented that non-retained MQTT still exposes enabled transcripts to broker subscribers.
+
 ## [0.4.0] - 2026-08-11
 
 ### Added

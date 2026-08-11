@@ -16,11 +16,18 @@ from .config import (
     MicroWakeWordActivationConfig,
     MicroWakeWordMapping,
     SourceConfig,
+    TranscriptEventsConfig,
 )
 from .ha_stt import HaSttClient
 from .matcher import WakeWordMatch, match_wake_word_prefix, normalize_for_match
 from .source import PCM_RATE, PCM_WIDTH, FfmpegPcmSource
 from .stt_worker import COMMAND_MAX_LENGTH, build_command_payload
+from .transcript import (
+    LatestTranscriptQueue,
+    TranscriptEventPublisher,
+    TranscriptProcessor,
+    TranscriptSegmentJob,
+)
 from .vad import (
     READ_TIMEOUT_SECONDS,
     VAD_CHUNK_BYTES,
@@ -69,6 +76,8 @@ class MicroWakeWordActivationWorker:
         budget: SubmissionBudget | None = None,
         clock: Callable[[], float] | None = None,
         association_grace_seconds: float = ASSOCIATION_GRACE_SECONDS,
+        transcript_config: TranscriptEventsConfig | None = None,
+        transcript_event_publisher: TranscriptEventPublisher | None = None,
         minimum_backoff: float = 1,
         maximum_backoff: float = 30,
     ) -> None:
@@ -85,6 +94,18 @@ class MicroWakeWordActivationWorker:
         self.minimum_backoff = minimum_backoff
         self.maximum_backoff = maximum_backoff
         self._words_by_model = {word.model: word for word in activation_config.wake_words}
+        self.transcript_processor = (
+            TranscriptProcessor(
+                source_config,
+                transcript_config,
+                publisher,
+                stt_factory=stt_factory,
+                budget=self.budget,
+                event_publisher=transcript_event_publisher,
+            )
+            if transcript_config is not None
+            else None
+        )
 
     def _now(self) -> float:
         if self.clock is not None:
@@ -99,18 +120,30 @@ class MicroWakeWordActivationWorker:
             self.activation_config.wyoming_port,
             self.activation_config.models,
         )
-        last_completed: tuple[bytes, float] | None = None
+        transcript_queue = (
+            LatestTranscriptQueue(self.transcript_processor)
+            if self.transcript_processor is not None
+            else None
+        )
+        transcript_task: asyncio.Task[None] | None = None
+        last_completed: tuple[bytes, float] | TranscriptSegmentJob | None = None
 
         async def read_for_wake() -> bytes:
             nonlocal last_completed
             chunk = await source.read_chunk()
             completed = collector.feed(chunk)
             if completed is not None:
-                last_completed = (completed, self._now())
+                completed_at = self._now()
+                if transcript_queue is not None:
+                    last_completed = transcript_queue.submit(completed, completed_at)
+                else:
+                    last_completed = (completed, completed_at)
             return chunk
 
         try:
             await source.start()
+            if transcript_queue is not None:
+                transcript_task = asyncio.create_task(transcript_queue.run(stop_event))
             detection = await wake_detector.detect(read_for_wake, stop_event)
             if detection is None:
                 return False, 0
@@ -123,7 +156,9 @@ class MicroWakeWordActivationWorker:
                 return True, self.activation_config.cooldown_seconds
 
             audio: bytes | None = None
+            transcript_job: TranscriptSegmentJob | None = None
             if collector.active:
+                last_completed = None
                 while collector.active and not stop_event.is_set():
                     chunk = await asyncio.wait_for(
                         source.read_chunk(),
@@ -131,37 +166,73 @@ class MicroWakeWordActivationWorker:
                     )
                     completed = collector.feed(chunk)
                     if completed is not None:
-                        audio = completed
+                        if transcript_queue is not None:
+                            last_completed = transcript_queue.submit(completed, self._now())
+                            transcript_job = last_completed
+                        else:
+                            audio = completed
                         break
             elif (
                 last_completed is not None
-                and self._now() - last_completed[1] <= self.association_grace_seconds
+                and self._now()
+                - (
+                    last_completed.completed_at
+                    if isinstance(last_completed, TranscriptSegmentJob)
+                    else last_completed[1]
+                )
+                <= self.association_grace_seconds
             ):
-                audio = last_completed[0]
+                if isinstance(last_completed, TranscriptSegmentJob):
+                    transcript_job = last_completed
+                else:
+                    audio = last_completed[0]
 
-            if audio is None or stop_event.is_set():
+            transcript: str | None = None
+            if transcript_job is not None and not stop_event.is_set():
+                transcript_result = await transcript_job.result
+                if transcript_result is not None and not transcript_result.budget_allowed:
+                    return False, transcript_result.retry_after
+                if transcript_result is not None:
+                    transcript = transcript_result.transcript
+
+            if (audio is None and transcript_job is None) or stop_event.is_set():
                 LOGGER.info(
                     "microWakeWord detection had no associated speech segment source_id=%s",
                     self.source_config.id,
                 )
+                if isinstance(last_completed, TranscriptSegmentJob):
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            asyncio.shield(last_completed.published),
+                            timeout=1.0,
+                        )
                 return True, self.activation_config.cooldown_seconds
 
-            audio_seconds = len(audio) / (PCM_RATE * PCM_WIDTH)
-            decision = self.budget.consume(audio_seconds)
-            if not decision.allowed:
-                LOGGER.warning(
-                    "microWakeWord STT privacy budget blocked submission source_id=%s "
-                    "reason=%s retry_seconds=%.1f",
-                    self.source_config.id,
-                    decision.reason,
-                    decision.retry_after,
-                )
-                return False, decision.retry_after
-
             request_id = str(uuid4())
-            transcript = await self.stt_factory(self.activation_config.pipeline_id).transcribe(
-                audio
-            )
+            if transcript_job is None:
+                assert audio is not None
+                audio_seconds = len(audio) / (PCM_RATE * PCM_WIDTH)
+                decision = self.budget.consume(audio_seconds)
+                if not decision.allowed:
+                    LOGGER.warning(
+                        "microWakeWord STT privacy budget blocked submission source_id=%s "
+                        "reason=%s retry_seconds=%.1f",
+                        self.source_config.id,
+                        decision.reason,
+                        decision.retry_after,
+                    )
+                    return False, decision.retry_after
+                transcript = await self.stt_factory(self.activation_config.pipeline_id).transcribe(
+                    audio
+                )
+            if transcript is None:
+                LOGGER.info(
+                    "microWakeWord command rejected source_id=%s request_id=%s "
+                    "reason=stt_unavailable",
+                    self.source_config.id,
+                    request_id,
+                )
+                return True, self.activation_config.cooldown_seconds
             command = command_from_transcript(transcript, word)
             if not command:
                 LOGGER.info(
@@ -218,9 +289,17 @@ class MicroWakeWordActivationWorker:
                 payload["wake_word_id"],
                 payload["request_id"],
             )
+            if transcript_job is not None:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(transcript_job.published), timeout=1.0)
             return True, self.activation_config.cooldown_seconds
         finally:
             collector.reset()
+            if transcript_task is not None:
+                transcript_task.cancel()
+                await asyncio.gather(transcript_task, return_exceptions=True)
+            if transcript_queue is not None:
+                transcript_queue.discard_pending()
             await source.close()
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:

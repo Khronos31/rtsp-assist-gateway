@@ -82,6 +82,10 @@ def main() -> None:
         raise SystemExit("Missing microwakeword_activation defaults")
     if "microwakeword_activation" not in config.get("schema", {}):
         raise SystemExit("Missing microwakeword_activation schema")
+    if "transcript_events" not in config.get("options", {}):
+        raise SystemExit("Missing transcript_events defaults")
+    if "transcript_events" not in config.get("schema", {}):
+        raise SystemExit("Missing transcript_events schema")
 
     run_sh = ADDON / "run.sh"
     if not run_sh.stat().st_mode & stat.S_IXUSR:

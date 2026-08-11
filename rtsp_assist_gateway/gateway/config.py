@@ -15,6 +15,7 @@ ALLOWED_LOG_LEVELS = {"debug", "info", "warning", "error"}
 CANARY_TOPIC = "rtsp_assist_gateway/canary/detection"
 HA_STT_CANARY_TOPIC = "rtsp_assist_gateway/canary/ha_stt"
 ACTIVATION_TOPIC = "rtsp_assist_gateway/activation"
+TRANSCRIPT_TOPIC = "rtsp_assist_gateway/transcript"
 MIN_NORMALIZED_ALIAS_LENGTH = 3
 
 
@@ -83,6 +84,16 @@ class MicroWakeWordActivationConfig:
 
 
 @dataclass(frozen=True)
+class TranscriptEventsConfig:
+    enabled: bool
+    source_id: str
+    pipeline_id: str
+    max_requests_per_minute: int
+    max_audio_seconds_per_hour: int
+    max_audio_seconds_per_day: int
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     log_level: str
     sources: tuple[SourceConfig, ...]
@@ -90,6 +101,7 @@ class GatewayConfig:
     ha_stt_canary: HaSttCanaryConfig
     ha_stt_activation: HaSttCanaryConfig
     microwakeword_activation: MicroWakeWordActivationConfig
+    transcript_events: TranscriptEventsConfig
 
 
 def _require_mapping(value: Any, field: str) -> dict[str, Any]:
@@ -377,6 +389,69 @@ def _parse_microwakeword_activation(
     )
 
 
+def _parse_transcript_events(root: dict[str, Any]) -> TranscriptEventsConfig:
+    field = "transcript_events"
+    raw = _require_mapping(root.get(field, {}), field)
+    for forbidden in ("mqtt_topic", "max_event_bytes"):
+        if forbidden in raw:
+            raise ConfigError(f"{field}.{forbidden} is fixed and must not be configured")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"{field}.enabled must be a boolean")
+
+    source_value = raw.get("source_id", "")
+    if not isinstance(source_value, str):
+        raise ConfigError(f"{field}.source_id must be a string")
+    source_id = source_value.strip()
+
+    pipeline_value = raw.get("pipeline_id", "")
+    if not isinstance(pipeline_value, str):
+        raise ConfigError(f"{field}.pipeline_id must be a string")
+    pipeline_id = pipeline_value.strip()
+    if len(pipeline_id) > 128 or any(ord(character) < 32 for character in pipeline_id):
+        raise ConfigError(f"{field}.pipeline_id contains invalid characters")
+
+    max_requests_per_minute = _bounded_int(
+        raw.get("max_requests_per_minute", 6),
+        f"{field}.max_requests_per_minute",
+        1,
+        60,
+    )
+    max_audio_seconds_per_hour = _bounded_int(
+        raw.get("max_audio_seconds_per_hour", 300),
+        f"{field}.max_audio_seconds_per_hour",
+        16,
+        3600,
+    )
+    max_audio_seconds_per_day = _bounded_int(
+        raw.get("max_audio_seconds_per_day", 1800),
+        f"{field}.max_audio_seconds_per_day",
+        16,
+        86400,
+    )
+    if max_audio_seconds_per_day < max_audio_seconds_per_hour:
+        raise ConfigError(f"{field}.max_audio_seconds_per_day must be at least the hourly limit")
+
+    return TranscriptEventsConfig(
+        enabled=enabled,
+        source_id=source_id,
+        pipeline_id=pipeline_id,
+        max_requests_per_minute=max_requests_per_minute,
+        max_audio_seconds_per_hour=max_audio_seconds_per_hour,
+        max_audio_seconds_per_day=max_audio_seconds_per_day,
+    )
+
+
+def _stt_contract(config: Any) -> tuple[str, str, int, int, int]:
+    return (
+        config.source_id,
+        config.pipeline_id,
+        config.max_requests_per_minute,
+        config.max_audio_seconds_per_hour,
+        config.max_audio_seconds_per_day,
+    )
+
+
 def parse_options(options: Any) -> GatewayConfig:
     root = _require_mapping(options, "options")
     log_level = str(root.get("log_level", "info")).lower()
@@ -439,6 +514,7 @@ def parse_options(options: Any) -> GatewayConfig:
     ha_stt_canary = _parse_ha_stt_config(root, "ha_stt_canary")
     ha_stt_activation = _parse_ha_stt_config(root, "ha_stt_activation")
     microwakeword_activation = _parse_microwakeword_activation(root)
+    transcript_events = _parse_transcript_events(root)
 
     if enabled:
         if len(sources) != 1:
@@ -470,6 +546,27 @@ def parse_options(options: Any) -> GatewayConfig:
             raise ConfigError(
                 "microwakeword_activation.source_id must reference a configured source"
             )
+    if transcript_events.enabled:
+        if len(sources) != 1:
+            raise ConfigError("transcript_events requires exactly one source")
+        if not transcript_events.source_id:
+            raise ConfigError("transcript_events.source_id is required when enabled")
+        if transcript_events.source_id not in seen_ids:
+            raise ConfigError("transcript_events.source_id must reference a configured source")
+        if enabled or ha_stt_canary.enabled:
+            raise ConfigError("transcript_events cannot run with a canary mode")
+        production_config: Any | None = None
+        if ha_stt_activation.enabled:
+            production_config = ha_stt_activation
+        elif microwakeword_activation.enabled:
+            production_config = microwakeword_activation
+        if production_config is not None and _stt_contract(transcript_events) != _stt_contract(
+            production_config
+        ):
+            raise ConfigError(
+                "transcript_events and the production activation mode must use identical "
+                "source, pipeline, and STT budgets"
+            )
     active_modes = sum(
         (
             enabled,
@@ -498,6 +595,7 @@ def parse_options(options: Any) -> GatewayConfig:
         ha_stt_canary=ha_stt_canary,
         ha_stt_activation=ha_stt_activation,
         microwakeword_activation=microwakeword_activation,
+        transcript_events=transcript_events,
     )
 
 
