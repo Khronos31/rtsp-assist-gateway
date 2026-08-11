@@ -6,7 +6,7 @@ It provides four mutually exclusive one-source modes. The microWakeWord routes s
 
 ## Current status
 
-Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. Version `0.3.0` adds the disabled-by-default generic HA STT activation event used by Home Assistant automations. The current development branch adds a disabled-by-default microWakeWord-gated activation mode; it remains unreleased until its live gates pass.
+Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. Version `0.3.0` adds the disabled-by-default generic HA STT activation event used by Home Assistant automations. Version `0.4.0` is a release candidate that adds a disabled-by-default microWakeWord-gated activation mode; it remains unreleased until its Study-only production canary passes.
 
 ## microWakeWord canary
 
