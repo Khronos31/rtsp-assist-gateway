@@ -188,3 +188,85 @@ def test_invalid_activation_options_fail_closed(mutate, match: str) -> None:
     mutate(options)
     with pytest.raises(ConfigError, match=match):
         parse_options(options)
+
+
+def microwakeword_activation_options() -> dict:
+    options = valid_options()
+    options["passive_canary"]["enabled"] = False
+    options["microwakeword_activation"] = {
+        "enabled": True,
+        "source_id": "study",
+        "wyoming_uri": "tcp://microwakeword:10400",
+        "wake_words": [
+            {
+                "model": "computer_v1",
+                "id": "computer",
+                "aliases": ["ねえコンピューター", "ねえコンピュータ"],
+            },
+            {
+                "model": "computer_v2",
+                "id": "computer",
+                "aliases": ["ヘイコンピューター"],
+            },
+        ],
+        "pipeline_id": "preferred-id",
+        "cooldown_seconds": 3,
+        "max_requests_per_minute": 6,
+        "max_audio_seconds_per_hour": 300,
+        "max_audio_seconds_per_day": 1800,
+    }
+    return options
+
+
+def test_valid_microwakeword_activation_maps_multiple_models_to_one_id() -> None:
+    config = parse_options(microwakeword_activation_options())
+    activation = config.microwakeword_activation
+    assert activation.enabled is True
+    assert activation.models == ("computer_v1", "computer_v2")
+    assert tuple(word.id for word in activation.wake_words) == ("computer", "computer")
+    assert activation.pipeline_id == "preferred-id"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda o: o["passive_canary"].update(enabled=True), "mutually exclusive"),
+        (
+            lambda o: o["microwakeword_activation"].update(source_id="missing"),
+            "configured source",
+        ),
+        (
+            lambda o: o["microwakeword_activation"].update(
+                wyoming_uri="http://microwakeword:10400"
+            ),
+            "tcp://host:port",
+        ),
+        (
+            lambda o: o["microwakeword_activation"]["wake_words"].append(
+                {
+                    "model": "computer_v1",
+                    "id": "other",
+                    "aliases": ["別のコンピューター"],
+                }
+            ),
+            "duplicate .* model",
+        ),
+        (
+            lambda o: o["microwakeword_activation"].update(mqtt_topic="assistant/chat/set"),
+            "fixed and must not be configured",
+        ),
+        (
+            lambda o: o["microwakeword_activation"]["wake_words"][0].update(aliases=[]),
+            "non-empty list",
+        ),
+        (
+            lambda o: o["microwakeword_activation"].update(max_audio_seconds_per_day=100),
+            "at least the hourly limit",
+        ),
+    ],
+)
+def test_invalid_microwakeword_activation_fails_closed(mutate, match: str) -> None:
+    options = microwakeword_activation_options()
+    mutate(options)
+    with pytest.raises(ConfigError, match=match):
+        parse_options(options)

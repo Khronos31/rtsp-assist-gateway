@@ -74,6 +74,14 @@ def main() -> None:
         raise SystemExit("Missing ha_stt_canary defaults")
     if "ha_stt_canary" not in config.get("schema", {}):
         raise SystemExit("Missing ha_stt_canary schema")
+    if "ha_stt_activation" not in config.get("options", {}):
+        raise SystemExit("Missing ha_stt_activation defaults")
+    if "ha_stt_activation" not in config.get("schema", {}):
+        raise SystemExit("Missing ha_stt_activation schema")
+    if "microwakeword_activation" not in config.get("options", {}):
+        raise SystemExit("Missing microwakeword_activation defaults")
+    if "microwakeword_activation" not in config.get("schema", {}):
+        raise SystemExit("Missing microwakeword_activation schema")
 
     run_sh = ADDON / "run.sh"
     if not run_sh.stat().st_mode & stat.S_IXUSR:
