@@ -4,7 +4,12 @@ import asyncio
 from collections import deque
 
 import pytest
-from gateway.vad import VAD_CHUNK_BYTES, VadError, capture_speech_segment
+from gateway.vad import (
+    VAD_CHUNK_BYTES,
+    SpeechSegmentCollector,
+    VadError,
+    capture_speech_segment,
+)
 
 
 class SequenceDetector:
@@ -65,4 +70,35 @@ async def test_stop_before_read_returns_none_and_resets() -> None:
     stop_event = asyncio.Event()
     stop_event.set()
     assert await capture_speech_segment(reader([]), detector, stop_event) is None
+    assert detector.reset_count == 1
+
+
+def test_stateful_collector_matches_async_segmentation_bytes() -> None:
+    silence_before = 10
+    speech = 4
+    silence_after = 25
+    values = [0.0] * silence_before + [0.9] * speech + [0.0] * silence_after
+    chunks = [bytes([index % 251]) * VAD_CHUNK_BYTES for index in range(len(values))]
+    detector = SequenceDetector(values)
+    collector = SpeechSegmentCollector(detector)
+
+    completed = [segment for chunk in chunks if (segment := collector.feed(chunk)) is not None]
+
+    assert completed == [b"".join(chunks)]
+    assert collector.active is False
+    assert detector.reset_count == 1
+
+
+def test_stateful_collector_discards_partial_segment_on_reset() -> None:
+    detector = SequenceDetector([0.9, 0.9])
+    collector = SpeechSegmentCollector(detector)
+    assert collector.feed(b"a" * VAD_CHUNK_BYTES) is None
+    assert collector.feed(b"b" * VAD_CHUNK_BYTES) is None
+    assert collector.active is True
+
+    collector.reset()
+
+    assert collector.active is False
+    assert collector.segment == []
+    assert collector.prebuffer == deque(maxlen=collector.prebuffer_count)
     assert detector.reset_count == 1

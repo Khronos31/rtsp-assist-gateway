@@ -2,11 +2,11 @@
 
 Experimental Home Assistant OS add-on for turning RTSP audio sources into generic activation events.
 
-It provides three mutually exclusive one-source modes. The microWakeWord route streams PCM to a Wyoming provider. The HA STT route segments speech locally, submits bounded candidates to a selected Home Assistant Assist STT pipeline, and performs deterministic wake-word prefix matching. The two canary modes publish only diagnostics; the opt-in HA STT activation mode publishes a generic activation event for Home Assistant automations to route. The gateway never invokes Home Assistant services, Embodied HA, or chat directly.
+It provides four mutually exclusive one-source modes. The microWakeWord routes stream PCM to a Wyoming provider. The HA STT routes segment speech locally, submit bounded candidates to a selected Home Assistant Assist STT pipeline, and perform deterministic wake-word prefix matching. The two canary modes publish only diagnostics; the opt-in HA STT and microWakeWord activation modes publish generic activation events for Home Assistant automations to route. The gateway never invokes Home Assistant services, Embodied HA, or chat directly.
 
 ## Current status
 
-Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. Version `0.3.0` adds the disabled-by-default generic activation event used by Home Assistant automations; it does not route to an assistant or invoke a Home Assistant service itself.
+Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. Version `0.3.0` adds the disabled-by-default generic HA STT activation event used by Home Assistant automations. The current development branch adds a disabled-by-default microWakeWord-gated activation mode; it remains unreleased until its live gates pass.
 
 ## microWakeWord canary
 
@@ -50,6 +50,32 @@ ha_stt_activation:
 ```
 
 Detections are published to `rtsp_assist_gateway/canary/detection` with QoS 1 and retain disabled. QoS 1 is at-least-once: subscribers must tolerate duplicates and may deduplicate using `request_id`.
+
+## microWakeWord activation
+
+```yaml
+microwakeword_activation:
+  enabled: true
+  source_id: study
+  wyoming_uri: tcp://47701997-microwakeword:10400
+  wake_words:
+    - model: computer_v1
+      id: computer
+      aliases:
+        - ねえコンピューター
+        - ねえコンピュータ
+  pipeline_id: ""
+  cooldown_seconds: 3
+  max_requests_per_minute: 6
+  max_audio_seconds_per_hour: 300
+  max_audio_seconds_per_day: 1800
+```
+
+This mode sends the same bounded in-memory PCM stream to the Wyoming wake detector and local VAD. Home Assistant STT is not contacted before a configured model is detected. After detection, only the currently active or just-completed speech segment inside a fixed 1.5-second association window is eligible for STT; the worker does not wait for unrelated later speech. The RTSP source is not reopened between detection and command capture.
+
+`model` is the exact name reported by the Wyoming provider. `id` is the generic canonical ID published for household automation routing; multiple model variants may map to the same ID. `aliases` are used only to remove a recognized wake prefix from the STT result. microWakeWord remains the wake authority, so a non-empty transcript is still accepted when STT does not recognize the alias. This avoids making wake reliability depend on STT spelling, but it also means a microWakeWord false positive can submit and route its associated speech segment. Run a representative passive-canary soak before enabling this mode.
+
+Successful commands use the existing fixed `rtsp_assist_gateway/activation` topic with `backend: microwakeword`, QoS 1, and retain disabled. Raw audio and transcripts are never persisted or logged. The aggregate HA STT request/audio budgets are shared with the HA STT modes across ordinary restarts and mode switches.
 
 ## HA STT canary
 
