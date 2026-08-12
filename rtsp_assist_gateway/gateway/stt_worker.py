@@ -12,10 +12,17 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from .budget import SubmissionBudget
-from .config import ACTIVATION_TOPIC, HA_STT_CANARY_TOPIC, HaSttCanaryConfig, SourceConfig
+from .config import (
+    ACTIVATION_TOPIC,
+    HA_STT_CANARY_TOPIC,
+    HaSttCanaryConfig,
+    SourceConfig,
+    TranscriptEventsConfig,
+)
 from .ha_stt import HaSttClient
 from .matcher import WakeWordMatch, match_wake_word_prefix
 from .source import PCM_RATE, PCM_WIDTH, FfmpegPcmSource
+from .transcript import TranscriptEventPublisher, TranscriptProcessor, TranscriptResult
 from .vad import VAD_CHUNK_BYTES, capture_speech_segment, new_silero_detector
 
 LOGGER = logging.getLogger(__name__)
@@ -68,6 +75,8 @@ class HaSttWorker:
         budget: SubmissionBudget | None = None,
         output_topic: str = HA_STT_CANARY_TOPIC,
         canary: bool = True,
+        transcript_config: TranscriptEventsConfig | None = None,
+        transcript_event_publisher: TranscriptEventPublisher | None = None,
         minimum_backoff: float = 1,
         maximum_backoff: float = 30,
     ) -> None:
@@ -86,6 +95,18 @@ class HaSttWorker:
         self.canary = canary
         self.minimum_backoff = minimum_backoff
         self.maximum_backoff = maximum_backoff
+        self.transcript_processor = (
+            TranscriptProcessor(
+                source_config,
+                transcript_config,
+                publisher,
+                stt_factory=stt_factory,
+                budget=self.budget,
+                event_publisher=transcript_event_publisher,
+            )
+            if transcript_config is not None
+            else None
+        )
 
     async def run_once(self, stop_event: asyncio.Event) -> tuple[bool, float]:
         source = self.source_factory(self.source_config)
@@ -96,19 +117,28 @@ class HaSttWorker:
             if audio is None:
                 return False, 0
             audio_seconds = len(audio) / (PCM_RATE * PCM_WIDTH)
-            decision = self.budget.consume(audio_seconds)
-            if not decision.allowed:
-                LOGGER.warning(
-                    "HA STT privacy budget blocked submission source_id=%s reason=%s "
-                    "retry_seconds=%.1f",
-                    self.source_config.id,
-                    decision.reason,
-                    decision.retry_after,
+            transcript_result: TranscriptResult | None = None
+            if self.transcript_processor is not None:
+                transcript_result = await self.transcript_processor.recognize(audio)
+                if not transcript_result.budget_allowed:
+                    return False, transcript_result.retry_after
+                transcript = transcript_result.transcript or ""
+            else:
+                decision = self.budget.consume(audio_seconds)
+                if not decision.allowed:
+                    LOGGER.warning(
+                        "HA STT privacy budget blocked submission source_id=%s reason=%s "
+                        "retry_seconds=%.1f",
+                        self.source_config.id,
+                        decision.reason,
+                        decision.retry_after,
+                    )
+                    return False, decision.retry_after
+                transcript = await self.stt_factory(self.canary_config.pipeline_id).transcribe(
+                    audio
                 )
-                return False, decision.retry_after
 
             request_id = str(uuid4())
-            transcript = await self.stt_factory(self.canary_config.pipeline_id).transcribe(audio)
             match = match_wake_word_prefix(transcript, self.canary_config.wake_words)
             if match is None:
                 LOGGER.info(
@@ -117,6 +147,8 @@ class HaSttWorker:
                     self.source_config.id,
                     request_id,
                 )
+                if transcript_result is not None:
+                    await self.transcript_processor.publish(transcript_result, stop_event)
                 return True, self.canary_config.cooldown_seconds
 
             if len(match.command) > COMMAND_MAX_LENGTH:
@@ -125,6 +157,8 @@ class HaSttWorker:
                     self.source_config.id,
                     request_id,
                 )
+                if transcript_result is not None:
+                    await self.transcript_processor.publish(transcript_result, stop_event)
                 return True, self.canary_config.cooldown_seconds
 
             payload = build_command_payload(
@@ -166,6 +200,8 @@ class HaSttWorker:
                 payload["wake_word_id"],
                 payload["request_id"],
             )
+            if transcript_result is not None:
+                await self.transcript_processor.publish(transcript_result, stop_event)
             return True, self.canary_config.cooldown_seconds
         finally:
             await source.close()

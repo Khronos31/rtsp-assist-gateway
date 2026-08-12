@@ -10,14 +10,17 @@ import gateway.microwake_worker as microwake_worker
 from gateway.budget import BudgetDecision
 from gateway.config import (
     ACTIVATION_TOPIC,
+    TRANSCRIPT_TOPIC,
     MicroWakeWordActivationConfig,
     MicroWakeWordMapping,
     SourceConfig,
+    TranscriptEventsConfig,
 )
 from gateway.microwake_worker import (
     MicroWakeWordActivationWorker,
     command_from_transcript,
 )
+from gateway.transcript import TranscriptEventPublisher
 from gateway.vad import VAD_CHUNK_BYTES
 from wyoming.wake import Detection
 
@@ -143,6 +146,8 @@ async def run_worker(
     publisher: RecordingPublisher | None = None,
     clock=None,
     grace: float = 1.5,
+    transcript_events: bool = False,
+    transcript_event_publisher: TranscriptEventPublisher | None = None,
 ):
     source, activation = configs()
     calls: list[tuple[str, bytes]] = []
@@ -158,6 +163,19 @@ async def run_worker(
         budget=budget or FakeBudget(),
         clock=clock,
         association_grace_seconds=grace,
+        transcript_config=(
+            TranscriptEventsConfig(
+                enabled=True,
+                source_id="study",
+                pipeline_id="preferred-id",
+                max_requests_per_minute=6,
+                max_audio_seconds_per_hour=300,
+                max_audio_seconds_per_day=1800,
+            )
+            if transcript_events
+            else None
+        ),
+        transcript_event_publisher=transcript_event_publisher,
         minimum_backoff=0,
     )
     result = await worker.run_once(asyncio.Event())
@@ -221,6 +239,23 @@ async def test_stale_completed_segment_is_not_submitted() -> None:
     assert publisher.attempts == []
 
 
+async def test_stale_transcript_segment_is_not_reused_for_activation() -> None:
+    chunks = prepare_stream()
+    FakeWakeDetector.reads_before_detection = len(chunks)
+    times = iter([100.0, 103.0])
+    result, publisher, calls = await run_worker(
+        "古い発話",
+        clock=lambda: next(times),
+        grace=1.5,
+        transcript_events=True,
+    )
+    assert result == (True, 3)
+    assert len(calls) == 1
+    topics = [attempt[0] for attempt in publisher.attempts]
+    assert ACTIVATION_TOPIC not in topics
+    assert TRANSCRIPT_TOPIC in topics
+
+
 async def test_unknown_model_is_rejected_before_stt() -> None:
     prepare_stream()
     FakeWakeDetector.reads_before_detection = 4
@@ -267,6 +302,51 @@ async def test_publish_retry_reuses_identical_payload() -> None:
     await run_worker("ねえコンピューター、テスト", publisher=publisher)
     assert len(publisher.attempts) == 2
     assert publisher.attempts[0] == publisher.attempts[1]
+
+
+async def test_transcript_overlay_reuses_associated_stt_result() -> None:
+    prepare_stream()
+    FakeWakeDetector.reads_before_detection = 4
+    result, publisher, calls = await run_worker(
+        "ねえコンピューター、テスト",
+        transcript_events=True,
+    )
+    assert result == (True, 3)
+    assert len(calls) == 1
+    topics = [attempt[0] for attempt in publisher.attempts]
+    assert topics.count(ACTIVATION_TOPIC) == 1
+    assert topics.count(TRANSCRIPT_TOPIC) == 1
+    transcript_payload = json.loads(
+        next(attempt[1] for attempt in publisher.attempts if attempt[0] == TRANSCRIPT_TOPIC)
+    )
+    assert transcript_payload["transcript"] == "ねえコンピューター、テスト"
+
+
+async def test_transcript_failures_do_not_suppress_microwake_activation() -> None:
+    class TopicFailingPublisher(RecordingPublisher):
+        async def publish(self, topic: str, payload: str, qos: int, retain: bool) -> None:
+            self.attempts.append((topic, payload, qos, retain))
+            if topic == TRANSCRIPT_TOPIC:
+                raise OSError("transcript delivery unavailable")
+
+    prepare_stream()
+    FakeWakeDetector.reads_before_detection = 4
+    publisher = TopicFailingPublisher()
+    result, _publisher, calls = await run_worker(
+        "ねえコンピューター、テスト",
+        publisher=publisher,
+        transcript_events=True,
+        transcript_event_publisher=TranscriptEventPublisher(
+            publisher,
+            attempts=2,
+            initial_backoff=0,
+        ),
+    )
+    assert result == (True, 3)
+    assert len(calls) == 1
+    topics = [attempt[0] for attempt in publisher.attempts]
+    assert topics.count(ACTIVATION_TOPIC) == 1
+    assert topics.count(TRANSCRIPT_TOPIC) == 2
 
 
 def test_command_fallback_does_not_require_stt_to_recognize_wake_alias() -> None:

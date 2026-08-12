@@ -244,3 +244,95 @@ Before deployment, abandon or revert the Gateway and Embodied HA feature branche
 - Increment 3: COMPLETE — disabled-by-default configuration, worker, MQTT contract, privacy, and budget tests implemented.
 - Increment 4: COMPLETE — EHA/automation backend allowlists implemented and verified without reload/restart.
 - Increment 5: COMPLETE for pre-deployment evidence; live criterion 9 remains intentionally pending.
+
+---
+
+# Conductor specification: opt-in ambient transcript events
+
+## Objective
+
+Add an explicitly enabled, generic transcript-event output to RTSP Assist Gateway so a separate
+first-party consumer can retain bounded recent household speech without opening a second RTSP stream,
+running a second VAD, or submitting the same speech segment to Home Assistant STT twice. Existing wake
+activation remains independent of Embodied HA and must continue when transcript publication is degraded.
+
+## Acceptance criteria
+
+1. `python -m pytest -q`, `ruff check .`, `ruff format --check .`,
+   `python -m compileall rtsp_assist_gateway tests scripts`, `python scripts/check_versions.py`,
+   `python scripts/verify_packaging.py`, and `git diff --check` all exit zero.
+2. Supervisor options expose disabled-by-default `transcript_events`. Its source, Assist pipeline, and
+   persistent request/audio budgets are validated before network access. It can run alone or alongside
+   one production activation mode only when source, pipeline, and budget settings are identical; canary
+   modes plus transcript output and mismatched combined settings fail closed.
+3. Successful events publish only to fixed topic `rtsp_assist_gateway/transcript`, with QoS 1 and retain
+   false. The version-1 payload contains event ID, UTC timestamp, source ID, configured room, backend,
+   transcript, duration, and a truncation flag; it contains no speaker guess, RTSP URL, credential,
+   Supervisor token, MQTT password, PCM, wake target, or Embodied HA route.
+4. Every encoded event is complete JSON no larger than 16 KiB. Oversized text is truncated at a Unicode
+   character boundary and marked; empty STT output is not published. Transcript text never appears in logs
+   or persistent Gateway state, and raw audio is never written.
+5. In HA STT activation mode, one captured segment causes exactly one STT request whose result may produce
+   both the transcript event and an activation. In microWakeWord activation mode, wake detection and VAD
+   still share one PCM source; the wake-associated segment has one STT request even when it also becomes a
+   transcript event. A bounded latest-segment queue prevents STT slowness from blocking PCM consumption.
+6. Transcript MQTT failure or backlog may drop/delay transcript events but does not suppress an activation
+   after STT has succeeded. QoS 1 retry reuses the same event ID and payload. Queue drops and failures may be
+   logged as counters/reasons only, never with transcript text.
+7. The existing persistent STT budget is consumed once per submitted segment and remains aggregate across
+   activation and transcript output. Exhaustion blocks provider contact; persisted state contains counters
+   only and no transcript/audio.
+8. Public documentation states the broker privacy boundary, disabled default, non-retained delivery,
+   at-least-once duplicate semantics, 16 KiB limit, no raw-audio retention, and the requirement for consumer
+   deduplication by event ID.
+9. The exact branch commit passes GitHub CI. **Unverified until separately authorized deployment:** an exact
+   Supervisor build with transcript output enabled publishes a real event and preserves one microWakeWord
+   activation without duplicate STT. No add-on restart, rebuild, version bump, tag, or release occurs in this
+   implementation increment.
+
+## Non-goals
+
+- Implementing `ambient_speech_context`, JSONL retention, prompt injection, files MCP integration, speaker
+  inference, summarization, or memory search.
+- Multiple simultaneous RTSP sources, Web UI/Ingress, arbitrary MQTT topics, raw-audio storage, or remote
+  LLM processing.
+- Changing the existing wake-command payload, household automation, Embodied HA, Home Assistant YAML, or
+  production add-on options.
+
+## Constraints
+
+- Do not touch `secrets.yaml`, `.ssh/`, `.storage/`, Home Assistant YAML, or production data.
+- Never log/persist RTSP URLs, credentials, tokens, PCM, or transcript text.
+- Keep Gateway generic: no character names, EHA MQTT prefixes, agent routing, memories, or speakers.
+- Do not restart/update/rebuild the Gateway, EHA, go2rtc, or Home Assistant, and do not bump a version or tag
+  a release without a new explicit authorization.
+- Preserve existing option compatibility when `transcript_events.enabled` is false.
+
+## Rollback
+
+Before deployment, delete or revert only `feat/transcript-events`; production remains on tagged `v0.4.0`.
+After a later deployment, set `transcript_events.enabled: false` and restart only the Gateway, or reinstall
+`v0.4.0`. The fixed activation contract and household automation require no rollback or data migration.
+
+## Increments
+
+1. Freeze the event schema, coexistence rules, privacy boundary, queue policy, and rollback through red-team.
+2. Implement strict configuration and a bounded transcript payload/publisher component with contract tests.
+3. Add standalone and HA STT activation reuse paths; verify one segment means one STT request.
+4. Add the microWakeWord shared-stream queue/reuse path; verify wake activation survives transcript failure.
+5. Update schema/docs, run the full local gate, commit/push the branch, and require exact-SHA CI success.
+6. Stop before version bump, Supervisor build, option change, restart, or live canary.
+
+## Pre-deployment evidence (2026-08-12)
+
+- Criteria 1–8: PASS locally. The repository has 114 passing tests; Ruff lint/format, compileall, version
+  consistency, packaging verification, and `git diff --check` all pass.
+- Configuration tests cover standalone output, HA STT/microWakeWord overlays, canary rejection, fixed topic
+  and size limit, missing sources, and exact source/pipeline/budget equality.
+- Payload tests prove complete UTF-8 JSON at or below 16 KiB, stable event IDs across QoS 1 retry, fixed
+  non-retained delivery, bounded retry, and content-free failure logs.
+- Worker tests prove one STT request can produce both activation and transcript events, stale speech is not
+  reused for activation, transcript failure does not suppress either production activation backend, and
+  the queue retains only one in-flight plus one latest pending segment.
+- Criterion 9 live portion remains intentionally unverified. No version bump, Supervisor build, option
+  change, restart, tag, release, Home Assistant YAML edit, or production write occurred.

@@ -5,6 +5,7 @@ from gateway.config import (
     ACTIVATION_TOPIC,
     CANARY_TOPIC,
     HA_STT_CANARY_TOPIC,
+    TRANSCRIPT_TOPIC,
     ConfigError,
     parse_options,
 )
@@ -269,4 +270,81 @@ def test_invalid_microwakeword_activation_fails_closed(mutate, match: str) -> No
     options = microwakeword_activation_options()
     mutate(options)
     with pytest.raises(ConfigError, match=match):
+        parse_options(options)
+
+
+def transcript_options(*, with_mode: str | None = None) -> dict:
+    if with_mode == "ha_stt":
+        options = activation_options()
+        pipeline_id = options["ha_stt_activation"]["pipeline_id"]
+    elif with_mode == "microwakeword":
+        options = microwakeword_activation_options()
+        pipeline_id = options["microwakeword_activation"]["pipeline_id"]
+    else:
+        options = valid_options()
+        options["passive_canary"]["enabled"] = False
+        pipeline_id = "preferred-id"
+    options["transcript_events"] = {
+        "enabled": True,
+        "source_id": "study",
+        "pipeline_id": pipeline_id,
+        "max_requests_per_minute": 6,
+        "max_audio_seconds_per_hour": 300,
+        "max_audio_seconds_per_day": 1800,
+    }
+    return options
+
+
+def test_transcript_events_standalone_and_production_overlay_are_valid() -> None:
+    standalone = parse_options(transcript_options())
+    ha_stt = parse_options(transcript_options(with_mode="ha_stt"))
+    microwake = parse_options(transcript_options(with_mode="microwakeword"))
+    assert standalone.transcript_events.enabled is True
+    assert ha_stt.transcript_events.enabled is True
+    assert microwake.transcript_events.enabled is True
+    assert TRANSCRIPT_TOPIC == "rtsp_assist_gateway/transcript"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda o: o["transcript_events"].update(source_id="missing"), "configured source"),
+        (lambda o: o["passive_canary"].update(enabled=True), "cannot run with a canary"),
+        (
+            lambda o: o["transcript_events"].update(mqtt_topic="household/private"),
+            "fixed and must not be configured",
+        ),
+        (
+            lambda o: o["transcript_events"].update(max_event_bytes=65_536),
+            "fixed and must not be configured",
+        ),
+        (
+            lambda o: o["transcript_events"].update(max_audio_seconds_per_day=100),
+            "at least the hourly limit",
+        ),
+    ],
+)
+def test_invalid_transcript_options_fail_closed(mutate, match: str) -> None:
+    options = transcript_options()
+    mutate(options)
+    with pytest.raises(ConfigError, match=match):
+        parse_options(options)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "pipeline_id",
+        "max_requests_per_minute",
+        "max_audio_seconds_per_hour",
+        "max_audio_seconds_per_day",
+    ],
+)
+def test_combined_transcript_contract_must_exactly_match_activation(field: str) -> None:
+    options = transcript_options(with_mode="microwakeword")
+    if field == "pipeline_id":
+        options["transcript_events"][field] = "different"
+    else:
+        options["transcript_events"][field] += 1
+    with pytest.raises(ConfigError, match="must use identical"):
         parse_options(options)

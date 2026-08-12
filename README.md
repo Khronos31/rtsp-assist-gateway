@@ -2,11 +2,11 @@
 
 Experimental Home Assistant OS add-on for turning RTSP audio sources into generic activation events.
 
-It provides four mutually exclusive one-source modes. The microWakeWord routes stream PCM to a Wyoming provider. The HA STT routes segment speech locally, submit bounded candidates to a selected Home Assistant Assist STT pipeline, and perform deterministic wake-word prefix matching. The two canary modes publish only diagnostics; the opt-in HA STT and microWakeWord activation modes publish generic activation events for Home Assistant automations to route. The gateway never invokes Home Assistant services, Embodied HA, or chat directly.
+It provides four mutually exclusive one-source activation modes. The microWakeWord routes stream PCM to a Wyoming provider. The HA STT routes segment speech locally, submits bounded candidates to a selected Home Assistant Assist STT pipeline, and performs deterministic wake-word prefix matching. The two canary modes publish only diagnostics; the opt-in HA STT and microWakeWord activation modes publish generic activation events for Home Assistant automations to route. A disabled-by-default transcript output can run alone or reuse a compatible production activation stream. The gateway never invokes Home Assistant services, Embodied HA, or chat directly.
 
 ## Current status
 
-Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. Version `0.3.0` adds the disabled-by-default generic HA STT activation event used by Home Assistant automations. Version `0.4.0` is a release candidate that adds a disabled-by-default microWakeWord-gated activation mode; it remains unreleased until its Study-only production canary passes.
+Tag `v0.1.0` contains the accepted Phase 1 microWakeWord canary. Version `0.2.0` adds the accepted Phase 2 HA STT canary after passing an exact Supervisor build, a positive Japanese utterance, a five-minute zero-activation room-audio soak, and the privacy-budget checks. Version `0.3.0` adds the disabled-by-default generic HA STT activation event used by Home Assistant automations. Version `0.4.0` adds the disabled-by-default microWakeWord-gated activation mode after its Study-only production canary passed. Version `0.5.0` adds disabled-by-default generic transcript events, released after an exact Supervisor build and a six-hour single-source live run in which 76 utterances were published with no duplicate, malformed, or out-of-order event, no transcript text in logs or status, and the privacy budget blocking submissions on both its per-minute and per-hour limits as designed.
 
 ## microWakeWord canary
 
@@ -133,10 +133,41 @@ The fixed topic is intentionally not an agent command topic. A Home Assistant au
 
 RTSP credentials may be included in the URL when required, but the add-on deliberately never prints the URL or forwards ffmpeg stderr. Raw audio is held only in memory while streaming and is never written to disk.
 
+## Ambient transcript events (development)
+
+```yaml
+transcript_events:
+  enabled: false
+  source_id: study
+  pipeline_id: ""
+  max_requests_per_minute: 6
+  max_audio_seconds_per_hour: 300
+  max_audio_seconds_per_day: 1800
+```
+
+When explicitly enabled, recognized speech is published to the fixed
+`rtsp_assist_gateway/transcript` topic with QoS 1 and retain disabled. The version-1 JSON event contains
+`event_id`, UTC timestamp, source ID, configured room, `backend: ha_stt`, transcript, duration in
+milliseconds, and a truncation flag. Consumers must deduplicate by `event_id` because QoS 1 is
+at-least-once. Every complete encoded event is limited to 16 KiB; longer Unicode text is safely truncated
+and marked without splitting JSON.
+
+Non-retained MQTT is not access control. Enabling this option makes ordinary household transcripts visible
+to MQTT broker clients that can subscribe to the fixed topic. The Gateway stores neither transcript text
+nor raw audio, but another subscriber may retain what it receives. The selected Home Assistant STT provider
+may also be remote or metered, so the persistent request/audio budgets apply before provider contact.
+
+Transcript output may run by itself, or alongside `ha_stt_activation` or `microwakeword_activation` when
+the source ID, pipeline ID, and all STT budgets are identical. Combined mode uses one RTSP reader, one VAD,
+and one STT request for a shared speech segment. It cannot run with either canary mode. A bounded queue keeps
+only one in-flight and one latest pending PCM segment; older pending speech may be dropped when STT is slow.
+Transcript delivery also uses bounded retry and is allowed to drop rather than block wake activation.
+
 ## Deliberate non-features
 
 - No Web UI or Ingress
 - No raw-audio recording
+- No transcript retention or speaker inference
 - No Home Assistant service calls
 - No direct command or chat output
 - No Embodied HA-specific routing

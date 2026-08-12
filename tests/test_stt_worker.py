@@ -9,11 +9,14 @@ from gateway.budget import BudgetDecision
 from gateway.config import (
     ACTIVATION_TOPIC,
     HA_STT_CANARY_TOPIC,
+    TRANSCRIPT_TOPIC,
     HaSttCanaryConfig,
     SourceConfig,
+    TranscriptEventsConfig,
     WakeWordConfig,
 )
 from gateway.stt_worker import HaSttCanaryWorker
+from gateway.transcript import TranscriptEventPublisher
 
 
 def configs(secret_url: str = "rtsp://user:password@example.invalid/study"):
@@ -93,6 +96,8 @@ async def run_worker(
     output_topic: str = HA_STT_CANARY_TOPIC,
     canary: bool = True,
     publisher: RecordingPublisher | None = None,
+    transcript_events: bool = False,
+    transcript_event_publisher: TranscriptEventPublisher | None = None,
 ):
     source, stt_config = configs()
     publisher = publisher or RecordingPublisher()
@@ -113,6 +118,19 @@ async def run_worker(
         budget=budget or FakeBudget(),
         output_topic=output_topic,
         canary=canary,
+        transcript_config=(
+            TranscriptEventsConfig(
+                enabled=True,
+                source_id="study",
+                pipeline_id="preferred-id",
+                max_requests_per_minute=6,
+                max_audio_seconds_per_hour=300,
+                max_audio_seconds_per_day=1800,
+            )
+            if transcript_events
+            else None
+        ),
+        transcript_event_publisher=transcript_event_publisher,
     )
     result = await worker.run_once(asyncio.Event())
     return result, publisher, calls, audio
@@ -221,6 +239,50 @@ async def test_publish_retry_reuses_identical_payload(monkeypatch) -> None:
     )
     assert len(publisher.attempts) == 2
     assert publisher.attempts[0] == publisher.attempts[1]
+
+
+async def test_activation_and_transcript_share_one_stt_result(monkeypatch) -> None:
+    result, publisher, calls, audio = await run_worker(
+        monkeypatch,
+        "ねえコンピューター、電気を消して。",
+        output_topic=ACTIVATION_TOPIC,
+        canary=False,
+        transcript_events=True,
+    )
+    assert result == (True, 3)
+    assert calls == [("preferred-id", audio)]
+    assert [call[0] for call in publisher.calls] == [ACTIVATION_TOPIC, TRANSCRIPT_TOPIC]
+    transcript = json.loads(publisher.calls[1][1])
+    assert transcript["event"] == "transcript_observed"
+    assert transcript["transcript"] == "ねえコンピューター、電気を消して。"
+
+
+async def test_transcript_publish_failure_does_not_suppress_activation(monkeypatch) -> None:
+    class TopicFailingPublisher(RecordingPublisher):
+        async def publish(self, topic: str, payload: str, qos: int, retain: bool) -> None:
+            self.calls.append((topic, payload, qos, retain))
+            if topic == TRANSCRIPT_TOPIC:
+                raise OSError("transcript broker failure")
+
+    publisher = TopicFailingPublisher()
+    transcript_publisher = TranscriptEventPublisher(
+        publisher,
+        attempts=2,
+        initial_backoff=0,
+    )
+    result, _publisher, calls, _audio = await run_worker(
+        monkeypatch,
+        "ねえコンピューター、電気を消して。",
+        output_topic=ACTIVATION_TOPIC,
+        canary=False,
+        publisher=publisher,
+        transcript_events=True,
+        transcript_event_publisher=transcript_publisher,
+    )
+    assert result == (True, 3)
+    assert len(calls) == 1
+    assert [call[0] for call in publisher.calls].count(ACTIVATION_TOPIC) == 1
+    assert [call[0] for call in publisher.calls].count(TRANSCRIPT_TOPIC) == 2
 
 
 async def test_session_failure_does_not_log_source_or_exception_secret(caplog) -> None:

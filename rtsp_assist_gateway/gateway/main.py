@@ -10,9 +10,62 @@ from .config import ACTIVATION_TOPIC, ConfigError, load_options
 from .microwake_worker import MicroWakeWordActivationWorker
 from .mqtt import PahoPublisher, fetch_mqtt_credentials
 from .stt_worker import HaSttCanaryWorker
+from .transcript import AmbientTranscriptWorker
 from .worker import PassiveCanaryWorker
 
 LOGGER = logging.getLogger(__name__)
+
+
+def build_worker(config, source, publisher):
+    """Select exactly one stream owner after configuration validation."""
+    if config.passive_canary.enabled:
+        LOGGER.info(
+            "Starting passive canary source_id=%s models=%s",
+            source.id,
+            ",".join(config.passive_canary.models),
+        )
+        return PassiveCanaryWorker(source, config.passive_canary, publisher)
+    if config.ha_stt_canary.enabled:
+        LOGGER.info(
+            "Starting HA STT canary source_id=%s wake_words=%d",
+            source.id,
+            len(config.ha_stt_canary.wake_words),
+        )
+        return HaSttCanaryWorker(source, config.ha_stt_canary, publisher)
+    if config.ha_stt_activation.enabled:
+        LOGGER.info(
+            "Starting HA STT activation source_id=%s wake_words=%d transcript_events=%s",
+            source.id,
+            len(config.ha_stt_activation.wake_words),
+            config.transcript_events.enabled,
+        )
+        return HaSttCanaryWorker(
+            source,
+            config.ha_stt_activation,
+            publisher,
+            output_topic=ACTIVATION_TOPIC,
+            canary=False,
+            transcript_config=(
+                config.transcript_events if config.transcript_events.enabled else None
+            ),
+        )
+    if config.microwakeword_activation.enabled:
+        LOGGER.info(
+            "Starting microWakeWord activation source_id=%s models=%d transcript_events=%s",
+            source.id,
+            len(config.microwakeword_activation.wake_words),
+            config.transcript_events.enabled,
+        )
+        return MicroWakeWordActivationWorker(
+            source,
+            config.microwakeword_activation,
+            publisher,
+            transcript_config=(
+                config.transcript_events if config.transcript_events.enabled else None
+            ),
+        )
+    LOGGER.info("Starting standalone transcript events source_id=%s", source.id)
+    return AmbientTranscriptWorker(source, config.transcript_events, publisher)
 
 
 async def run() -> None:
@@ -29,6 +82,7 @@ async def run() -> None:
             config.ha_stt_canary.enabled,
             config.ha_stt_activation.enabled,
             config.microwakeword_activation.enabled,
+            config.transcript_events.enabled,
         )
     ):
         LOGGER.info("All activation modes are disabled; waiting for add-on configuration")
@@ -41,51 +95,16 @@ async def run() -> None:
         active_source_id = config.ha_stt_canary.source_id
     elif config.ha_stt_activation.enabled:
         active_source_id = config.ha_stt_activation.source_id
-    else:
+    elif config.microwakeword_activation.enabled:
         active_source_id = config.microwakeword_activation.source_id
+    else:
+        active_source_id = config.transcript_events.source_id
     source = next(item for item in config.sources if item.id == active_source_id)
     credentials = await asyncio.to_thread(fetch_mqtt_credentials)
     publisher = PahoPublisher(credentials)
     await publisher.connect()
     try:
-        if config.passive_canary.enabled:
-            LOGGER.info(
-                "Starting passive canary source_id=%s models=%s",
-                source.id,
-                ",".join(config.passive_canary.models),
-            )
-            worker = PassiveCanaryWorker(source, config.passive_canary, publisher)
-        elif config.ha_stt_canary.enabled:
-            LOGGER.info(
-                "Starting HA STT canary source_id=%s wake_words=%d",
-                source.id,
-                len(config.ha_stt_canary.wake_words),
-            )
-            worker = HaSttCanaryWorker(source, config.ha_stt_canary, publisher)
-        elif config.ha_stt_activation.enabled:
-            LOGGER.info(
-                "Starting HA STT activation source_id=%s wake_words=%d",
-                source.id,
-                len(config.ha_stt_activation.wake_words),
-            )
-            worker = HaSttCanaryWorker(
-                source,
-                config.ha_stt_activation,
-                publisher,
-                output_topic=ACTIVATION_TOPIC,
-                canary=False,
-            )
-        else:
-            LOGGER.info(
-                "Starting microWakeWord activation source_id=%s models=%d",
-                source.id,
-                len(config.microwakeword_activation.wake_words),
-            )
-            worker = MicroWakeWordActivationWorker(
-                source,
-                config.microwakeword_activation,
-                publisher,
-            )
+        worker = build_worker(config, source, publisher)
         await worker.run_forever(stop_event)
     finally:
         await publisher.close()
