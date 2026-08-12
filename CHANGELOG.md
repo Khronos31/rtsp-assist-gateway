@@ -2,7 +2,7 @@
 
 Notable changes to RTSP Assist Gateway are recorded here.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-12
 
 ### Added
 
