@@ -2,6 +2,12 @@
 
 Experimental Home Assistant OS add-on for turning RTSP audio sources into generic activation events.
 
+## Installation
+
+Add [`https://github.com/Khronos31/embodied-ha-addons`](https://github.com/Khronos31/embodied-ha-addons)
+to the Home Assistant add-on store, then install **RTSP Assist Gateway** from it. This repository holds
+the source and is not itself an add-on repository.
+
 It provides four mutually exclusive one-source activation modes. The microWakeWord routes stream PCM to a Wyoming provider. The HA STT routes segment speech locally, submits bounded candidates to a selected Home Assistant Assist STT pipeline, and performs deterministic wake-word prefix matching. The two canary modes publish only diagnostics; the opt-in HA STT and microWakeWord activation modes publish generic activation events for Home Assistant automations to route. A disabled-by-default transcript output can run alone or reuse a compatible production activation stream. The gateway never invokes Home Assistant services, Embodied HA, or chat directly.
 
 ## Current status
